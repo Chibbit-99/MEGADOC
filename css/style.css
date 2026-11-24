@@ -478,3 +478,20 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--blue);outline-o
   .page.dark-page blockquote{color:#333!important}
   :root[data-ui-theme="dark"] .page blockquote{color:#333!important}
 }
+
+/* A soft edge distinguishes the stationary navigation from the scrolling page. */
+.crumbbar{position:relative;z-index:3;border-bottom:1px solid transparent;transition:box-shadow .15s,border-color .15s}
+.editor-area.scrolled .crumbbar{border-bottom-color:var(--line-2);box-shadow:0 3px 8px rgba(20,25,40,.08)}
+.scroll-fade{position:sticky;top:-8px;height:24px;margin-bottom:-24px;z-index:2;pointer-events:none;opacity:0;background:linear-gradient(to bottom,var(--bg),transparent);transition:opacity .15s}
+.editor-area.scrolled .scroll-fade{opacity:1}
+.context-menu{max-height:calc(100vh - 16px);max-width:calc(100vw - 16px);overflow:auto}
+.table-fields{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.table-header-option{display:flex;align-items:center;gap:8px;font-size:14px;margin:0 0 12px;color:var(--ink)}
+.setting-toggle{display:flex;gap:10px;align-items:flex-start;color:var(--ink);margin-bottom:16px;cursor:pointer}
+.setting-toggle input{margin-top:5px;accent-color:var(--accent-solid)}
+.setting-toggle small{display:block;margin-top:3px;color:var(--ink-2);line-height:1.5}
+.page table{table-layout:fixed}
+.page th,.page td{min-width:48px;vertical-align:top;overflow-wrap:anywhere}
+.page th{font-weight:600}
+.page td:focus,.page th:focus{outline:1px solid var(--blue);outline-offset:-1px}
+@media print{.scroll-fade{display:none}.crumbbar{box-shadow:none}}

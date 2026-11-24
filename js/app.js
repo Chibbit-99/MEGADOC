@@ -223,7 +223,7 @@ function selectTab(id) {
 
 function addTab(parentId = null, title = 'Untitled tab') {
   const id = uid();
-  state.tabs[id] = { id, title, parentId, children: [], content: `<h1>${esc(title)}</h1><p>Start writing…</p>`, updatedAt: Date.now(), history: [], comments: [] };
+  state.tabs[id] = { id, title, parentId, children: [], content: '', updatedAt: Date.now(), history: [], comments: [] };
   if (parentId && getTab(parentId)) {
     getTab(parentId).children.push(id);
     if (!state.expanded.includes(parentId)) state.expanded.push(parentId);
@@ -418,6 +418,90 @@ page.addEventListener('paste', e => {
   e.preventDefault();
   const text = e.clipboardData.getData('text/plain');
   document.execCommand('insertText', false, text);
+});
+
+/* Markdown shortcuts are deliberately local to the current plain-text run.
+   This avoids rewriting existing formatting or anything inside code or tables. */
+function handleMarkdownKey(e) {
+  if (!appearance.markdown || mode === 'viewing' || !getTab(state.activeTabId) || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || (e.key !== ' ' && e.key !== 'Enter')) return;
+  const sel = getSelection();
+  if (!sel.rangeCount || !sel.isCollapsed || !page.contains(sel.anchorNode)) return;
+  const node = sel.anchorNode;
+  const parent = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  const pre = parent?.closest('pre');
+  if (pre && e.key === 'Enter' && node.nodeType === Node.TEXT_NODE && node.parentNode === pre && node === pre.lastChild && sel.anchorOffset === node.length && node.data.endsWith('```')) {
+    const start = sel.anchorOffset - 3;
+    if ((start === 0 && (!node.previousSibling || node.previousSibling.nodeName === 'BR')) || node.data[start - 1] === '\n') {
+      e.preventDefault();
+      const content = document.createRange(); content.selectNodeContents(pre); content.setEnd(node, start);
+      const copy = document.createElement('pre'); copy.appendChild(content.cloneContents());
+      const paragraph = document.createElement('p'); paragraph.appendChild(document.createElement('br'));
+      pre.replaceWith(copy, paragraph);
+      const range = document.createRange(); range.selectNodeContents(paragraph); range.collapse(true);
+      sel.removeAllRanges(); sel.addRange(range); editorRange = range.cloneRange();
+      saveCurrentContent(); updateWordCount(); save();
+      return;
+    }
+  }
+  if (!parent || parent.closest('pre,code,a')) return;
+  const candidate = parent.closest('p,div,h1,h2,h3,blockquote');
+  const block = candidate && page.contains(candidate) ? candidate : page;
+  const before = document.createRange();
+  before.selectNodeContents(block); before.setEnd(node, sel.anchorOffset);
+  const prefix = before.toString();
+  const blockMatch = !parent.closest('td,th,li') && (e.key === ' ' || (e.key === 'Enter' && prefix === '```')) && /^(#{1,3}|[-*+]|1\.|>|```|---)$/.exec(prefix);
+  if (blockMatch) {
+    e.preventDefault();
+    sel.removeAllRanges(); sel.addRange(before);
+    document.execCommand('delete', false);
+    const token = blockMatch[1];
+    if (token[0] === '#') document.execCommand('formatBlock', false, 'H' + token.length);
+    else if (token === '>') document.execCommand('formatBlock', false, 'BLOCKQUOTE');
+    else if (token === '```') document.execCommand('formatBlock', false, 'PRE');
+    else if (token === '---') document.execCommand('insertHorizontalRule', false);
+    else document.execCommand(token === '1.' ? 'insertOrderedList' : 'insertUnorderedList', false);
+    if (sel.rangeCount && page.contains(sel.anchorNode)) editorRange = sel.getRangeAt(0).cloneRange();
+    saveCurrentContent(); updateWordCount(); save();
+    return;
+  }
+  if (node.nodeType !== Node.TEXT_NODE) return;
+  const text = node.data.slice(0, sel.anchorOffset);
+  const patterns = [
+    { re: /\*\*([^*\n]+)\*\*$/, tag: 'strong' },
+    { re: /__([^_\n]+)__$/, tag: 'strong' },
+    { re: /(?:^|[^*])\*([^*\n]+)\*$/, tag: 'em', prefix: true },
+    { re: /(?:^|[^_\w])_([^_\n]+)_$/, tag: 'em', prefix: true },
+    { re: /~~([^~\n]+)~~$/, tag: 's' },
+    { re: /`([^`\n]+)`$/, tag: 'code' },
+    { re: /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)$/, tag: 'a' },
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.re.exec(text);
+    if (!match) continue;
+    const leading = pattern.prefix && match[0][0] !== '*' && match[0][0] !== '_' ? 1 : 0;
+    const start = match.index + leading;
+    if (start > 0 && text[start - 1] === '\\') continue;
+    const range = document.createRange(); range.setStart(node, start); range.setEnd(node, sel.anchorOffset);
+    sel.removeAllRanges(); sel.addRange(range);
+    const value = esc(match[1]);
+    const html = pattern.tag === 'a' ? `<a href="${esc(match[2])}" target="_blank" rel="noopener">${value}</a>` : `<${pattern.tag}>${value}</${pattern.tag}>`;
+    if (e.key === ' ') e.preventDefault();
+    document.execCommand('insertHTML', false, html + (e.key === ' ' ? '&nbsp;' : ''));
+    if (sel.rangeCount && page.contains(sel.anchorNode)) editorRange = sel.getRangeAt(0).cloneRange();
+    saveCurrentContent(); updateWordCount(); save();
+    break;
+  }
+}
+page.addEventListener('keydown', handleMarkdownKey);
+// Mobile keyboards may not send meaningful keydown events; use beforeinput as a fallback.
+let handlingMarkdownInput = false;
+page.addEventListener('beforeinput', e => {
+  if (handlingMarkdownInput || e.isComposing) return;
+  const key = e.inputType === 'insertText' && e.data === ' ' ? ' ' : e.inputType === 'insertParagraph' ? 'Enter' : null;
+  if (!key) return;
+  handlingMarkdownInput = true;
+  try { handleMarkdownKey({ key, isComposing: false, preventDefault: () => e.preventDefault() }); }
+  finally { handlingMarkdownInput = false; }
 });
 
 function renderCrumbs() {
@@ -620,6 +704,7 @@ const MENUS = [
   ]},
   { label: 'Settings', items: [
     { icon: 'palette', label: 'Appearance…', fn: showAppearance },
+    { icon: 'edit_note', label: 'Writing preferences…', fn: showWritingSettings },
   ]},
   { label: 'Edit', items: [
     { icon: 'undo', label: 'Undo', shortcut: 'Ctrl+Z', fn: () => exec('undo') },
@@ -714,9 +799,121 @@ function openMenu(i, anchor) {
   dd.querySelectorAll('.mi').forEach(b => b.addEventListener('click', () => { closeMenus(); menu.items[+b.dataset.i].fn(); }));
 }
 
+/* Editor context menu: native browser menus remain available outside the page. */
+function showEditorContext(e) {
+  if (!getTab(state.activeTabId) || mode === 'viewing' || e.target.closest('input,textarea,select,button')) return;
+  e.preventDefault();
+  const selection = getSelection();
+  if (selection.rangeCount && page.contains(selection.anchorNode) && page.contains(selection.focusNode)) editorRange = selection.getRangeAt(0).cloneRange();
+  const cell = e.target.closest('td,th');
+  const table = cell?.closest('table');
+  closeMenus();
+  const menu = $('#contextMenu');
+  menu.innerHTML = (table && page.contains(table) ? `
+    <div class="mi-label">Table</div>
+    <button class="mi" data-editor-action="row-before"><span class="material-symbols-outlined">add</span> Insert row above</button>
+    <button class="mi" data-editor-action="row-after"><span class="material-symbols-outlined">add</span> Insert row below</button>
+    <button class="mi" data-editor-action="col-before"><span class="material-symbols-outlined">add</span> Insert column left</button>
+    <button class="mi" data-editor-action="col-after"><span class="material-symbols-outlined">add</span> Insert column right</button>
+    <button class="mi" data-editor-action="row-delete"><span class="material-symbols-outlined">remove</span> Delete row</button>
+    <button class="mi" data-editor-action="col-delete"><span class="material-symbols-outlined">remove</span> Delete column</button>
+    <button class="mi danger" data-editor-action="table-delete"><span class="material-symbols-outlined">delete</span> Delete table</button>
+    <div class="mi-sep"></div>` : '') + `
+    <div class="mi-label">Edit</div>
+    <button class="mi" data-editor-action="undo"><span class="material-symbols-outlined">undo</span> Undo</button>
+    <button class="mi" data-editor-action="cut"><span class="material-symbols-outlined">content_cut</span> Cut</button>
+    <button class="mi" data-editor-action="copy"><span class="material-symbols-outlined">content_copy</span> Copy</button>
+    <button class="mi" data-editor-action="paste"><span class="material-symbols-outlined">content_paste</span> Paste</button>
+    <button class="mi" data-editor-action="select-all"><span class="material-symbols-outlined">select_all</span> Select all</button>`;
+  menu.classList.remove('hidden');
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(e.clientX, innerWidth - rect.width - 8)) + 'px';
+  menu.style.top = Math.max(8, Math.min(e.clientY, innerHeight - rect.height - 8)) + 'px';
+  menu.querySelectorAll('[data-editor-action]').forEach(button => button.addEventListener('click', () => {
+    const action = button.dataset.editorAction;
+    closeMenus();
+    if (['row-before','row-after','col-before','col-after','row-delete','col-delete','table-delete'].includes(action)) editTable(table, cell, action);
+    else if (action === 'undo') exec('undo');
+    else if (action === 'cut' || action === 'copy') clipboardCommand(action);
+    else if (action === 'paste') pasteAction();
+    else if (action === 'select-all') exec('selectAll');
+  }));
+}
+page.addEventListener('contextmenu', showEditorContext);
+
+function editTable(table, cell, action) {
+  if (!table || !cell || !page.contains(table) || mode === 'viewing') return;
+  const rows = [...table.rows];
+  const rowIndex = rows.indexOf(cell.parentElement), colIndex = cell.cellIndex;
+  if (rowIndex < 0 || colIndex < 0) return;
+  const columns = rows[0]?.cells.length || 0;
+  if (action !== 'table-delete' && rows.some(row => row.cells.length !== columns || [...row.cells].some(c => c.rowSpan !== 1 || c.colSpan !== 1))) {
+    toast('Row and column editing is not supported for merged or uneven cells', 'info'); return;
+  }
+  if (action === 'row-delete' && rows.length === 1) { toast('Use Delete table to remove the last row', 'info'); return; }
+  if (action === 'col-delete' && columns === 1) { toast('Use Delete table to remove the last column', 'info'); return; }
+  const clone = table.cloneNode(true);
+  const cloneRows = [...clone.rows];
+  const cloneRow = cloneRows[rowIndex];
+  const emptyCell = tag => { const el = document.createElement(tag); el.appendChild(document.createElement('br')); return el; };
+  if (action === 'row-before' || action === 'row-after') {
+    const row = document.createElement('tr');
+    for (const existing of cloneRow.cells) {
+      const afterHeader = action === 'row-after' && cloneRow.parentElement.tagName !== 'THEAD' && [...cloneRow.cells].every(c => c.tagName === 'TH') && (!cloneRow.nextElementSibling || cloneRow.nextElementSibling.cells[0]?.tagName === 'TD');
+      row.appendChild(emptyCell(afterHeader ? 'td' : existing.tagName.toLowerCase()));
+    }
+    cloneRow.parentElement.insertBefore(row, action === 'row-before' ? cloneRow : cloneRow.nextSibling);
+  } else if (action === 'row-delete') cloneRow.remove();
+  else if (action === 'col-delete') cloneRows.forEach(row => row.cells[colIndex].remove());
+  else if (action === 'col-before' || action === 'col-after') cloneRows.forEach(row => {
+    const reference = row.cells[colIndex];
+    row.insertBefore(emptyCell(reference.tagName.toLowerCase()), action === 'col-before' ? reference : reference.nextSibling);
+  });
+  // Replacing through the editing engine makes the operation undoable and autosaved.
+  const range = document.createRange(); range.selectNode(table);
+  page.focus(); const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+  document.execCommand('insertHTML', false, action === 'table-delete' ? '' : clone.outerHTML);
+  editorRange = selection.rangeCount && page.contains(selection.anchorNode) ? selection.getRangeAt(0).cloneRange() : null;
+  saveCurrentContent(); updateWordCount(); save();
+}
+
+// Tab and Shift+Tab navigate cells while editing a table.
+page.addEventListener('keydown', e => {
+  if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey || mode === 'viewing') return;
+  const selection = getSelection();
+  const node = selection.anchorNode;
+  const cell = (node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement)?.closest('td,th');
+  const table = cell?.closest('table');
+  if (!table || !page.contains(table)) return;
+  const cells = [...table.rows].flatMap(row => [...row.cells]);
+  const next = cells[cells.indexOf(cell) + (e.shiftKey ? -1 : 1)];
+  if (!next) return;
+  e.preventDefault();
+  const range = document.createRange(); range.selectNodeContents(next); range.collapse(true);
+  selection.removeAllRanges(); selection.addRange(range); editorRange = range.cloneRange();
+});
+
 function insertTable() {
-  exec('insertHTML', '<table><tr><th>Header 1</th><th>Header 2</th><th>Header 3</th></tr><tr><td>Cell</td><td>Cell</td><td>Cell</td></tr><tr><td>Cell</td><td>Cell</td><td>Cell</td></tr></table><p><br></p>');
-  toast('Table inserted', 'table');
+  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'error'); return; }
+  openModal('Insert table', `<div class="table-fields">
+    <div class="field"><label for="tableRows">Rows</label><input type="number" id="tableRows" min="1" max="20" value="3"></div>
+    <div class="field"><label for="tableCols">Columns</label><input type="number" id="tableCols" min="1" max="20" value="3"></div>
+  </div><label class="table-header-option"><input type="checkbox" id="tableHeader" checked> First row is a header</label>
+  <p class="appearance-note">Right-click a cell to add or remove rows and columns.</p>`,
+  `<button class="btn text" id="tableCancel">Cancel</button><button class="btn primary" id="tableInsert">Insert table</button>`);
+  $('#tableCancel').addEventListener('click', closeModal);
+  $('#tableInsert').addEventListener('click', () => {
+    const rows = Number($('#tableRows').value), cols = Number($('#tableCols').value);
+    if (!Number.isInteger(rows) || !Number.isInteger(cols) || rows < 1 || rows > 20 || cols < 1 || cols > 20) { toast('Choose 1–20 rows and columns', 'error'); return; }
+    const header = $('#tableHeader').checked;
+    let html = '<table><tbody>';
+    for (let r = 0; r < rows; r++) {
+      const tag = header && r === 0 ? 'th' : 'td';
+      html += '<tr>' + `<${tag}><br></${tag}>`.repeat(cols) + '</tr>';
+    }
+    html += '</tbody></table><p><br></p>';
+    closeModal(); exec('insertHTML', html); toast('Table inserted', 'table');
+  });
 }
 let findIndex = -1;
 function findInTab() {
@@ -898,11 +1095,12 @@ const ACCENTS = [
   { id: 'berry', label: 'Berry', color: '#a13f63' },
   { id: 'amber', label: 'Amber', color: '#895c00' },
 ];
-let appearance = { theme: 'light', accent: 'indigo' };
+let appearance = { theme: 'light', accent: 'indigo', markdown: true };
 try {
   const saved = JSON.parse(localStorage.getItem(APPEARANCE_KEY));
   if (saved && ['light', 'dark'].includes(saved.theme)) appearance.theme = saved.theme;
   if (saved && ACCENTS.some(a => a.id === saved.accent)) appearance.accent = saved.accent;
+  if (saved && typeof saved.markdown === 'boolean') appearance.markdown = saved.markdown;
 } catch { /* defaults when local storage is unavailable or invalid */ }
 function applyAppearance() {
   document.documentElement.dataset.uiTheme = appearance.theme;
@@ -931,6 +1129,17 @@ function showAppearance() {
   $$('#modal [name="uiTheme"]').forEach(input => input.addEventListener('change', () => { appearance.theme = input.value; saveAppearance(); }));
   $$('#modal [name="accentColor"]').forEach(input => input.addEventListener('change', () => { appearance.accent = input.value; saveAppearance(); }));
   $('#appearanceDone').addEventListener('click', closeModal);
+}
+
+function showWritingSettings() {
+  openModal('Writing preferences', `
+    <label class="setting-toggle"><input type="checkbox" id="markdownEnabled" ${appearance.markdown ? 'checked' : ''}>
+      <span><strong>Markdown shortcuts</strong><small>Automatically format headings, lists, quotes, code and inline text as you type.</small></span>
+    </label>
+    <p class="appearance-note">Type a marker such as #, -, 1., &gt; or three backticks followed by a space. Finish inline Markdown, then type a space or press Enter.</p>`,
+    `<button class="btn primary" id="writingDone">Done</button>`);
+  $('#markdownEnabled').addEventListener('change', e => { appearance.markdown = e.target.checked; saveAppearance(); });
+  $('#writingDone').addEventListener('click', closeModal);
 }
 
 /* ─────────────────────────── View / theme helpers ─────────────────────────── */
@@ -1246,6 +1455,7 @@ function init() {
   buildRuler();
   addEventListener('resize', () => { buildRuler(); closeMenus(); });
   $('#toolbar .toolbar-scroll').addEventListener('scroll', () => { $$('.tb-dropdown.open').forEach(positionToolbarMenu); });
+  $('#pageScroll').addEventListener('scroll', e => $('#editorArea').classList.toggle('scrolled', e.target.scrollTop > 2));
 
   dragMarker($('#markerLeft'), x => {
     const r = $('#ruler').getBoundingClientRect();
