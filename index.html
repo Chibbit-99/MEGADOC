@@ -6,7 +6,7 @@
 <title>MegaDoc — All your notes in one document</title>
 <meta name="description" content="MegaDoc is a software for putting all your notes in one document when you are too lazy to manage 15 billion of them." />
 <link rel="icon" type="image/svg+xml" href="assets/megadoc.svg" />
-<link rel="stylesheet" href="css/style.css?v=7" />
+<link rel="stylesheet" href="css/style.css?v=8" />
 </head>
 <body>
 
@@ -165,11 +165,10 @@
 </div>
 
 <!-- ══════════ RULER ══════════ -->
-<div class="ruler" id="ruler" aria-hidden="true">
-  <div class="ruler-ticks" id="rulerTicks"></div>
-  <div class="ruler-marker first-line" id="markerFirstLine" title="First line indent"></div>
-  <div class="ruler-marker left" id="markerLeft" title="Left indent"></div>
-  <div class="ruler-marker right" id="markerRight" title="Right indent"></div>
+<div class="ruler" id="ruler" aria-label="Document ruler">
+  <div class="ruler-ticks" id="rulerTicks" aria-hidden="true"></div>
+  <div class="ruler-marker left" id="markerLeft" role="slider" tabindex="0" aria-label="Left page margin" aria-orientation="horizontal" title="Left page margin"></div>
+  <div class="ruler-marker right" id="markerRight" role="slider" tabindex="0" aria-label="Right page margin" aria-orientation="horizontal" title="Right page margin"></div>
 </div>
 
 <!-- ══════════ WORKSPACE ══════════ -->
@@ -245,6 +244,6 @@
 <div class="toast-wrap" id="toastWrap"></div>
 <input type="file" id="importFile" accept=".json,application/json" hidden />
 
-<script type="module" src="js/app.js?v=7"></script>
+<script type="module" src="js/app.js?v=8"></script>
 </body>
 </html>

@@ -117,8 +117,6 @@ body.toolbar-hidden .ruler{display:none}
 .ruler-marker{position:absolute;top:0;width:12px;height:100%;cursor:ew-resize;z-index:2}
 .ruler-marker::before{content:'';position:absolute;left:50%;top:2px;transform:translateX(-50%);border:5px solid transparent;border-top:7px solid var(--blue)}
 .ruler-marker::after{content:'';position:absolute;left:50%;top:11px;transform:translateX(-50%);width:3px;height:9px;background:var(--blue)}
-.ruler-marker.first-line::before{border-top-color:#5f6368}
-.ruler-marker.first-line::after{background:#5f6368}
 
 /* ── Workspace ── */
 .workspace{flex:1;display:flex;min-height:0;position:relative}
@@ -176,7 +174,7 @@ body.toolbar-hidden .ruler{display:none}
 .save-status .material-symbols-outlined{font-size:15px}
 .save-status.saving{color:var(--blue)}
 .page-scroll{flex:1;overflow-y:auto;padding:8px 24px 80px}
-.page-wrap{width:816px;max-width:100%;margin:0 auto;transform-origin:top center;transition:transform .15s}
+.page-wrap{width:816px;max-width:100%;margin:0 auto;transform-origin:top center;transition:none}
 .page{background:#fff;border:1px solid #d9dcda;box-shadow:var(--shadow-page);min-height:1056px;padding:72px 72px 96px;outline:none;font-family:Arial,Helvetica,sans-serif;font-size:11pt;line-height:1.5;color:#000;word-wrap:break-word}
 .page:focus{box-shadow:var(--shadow-page)}
 .page h1{font-size:26pt;font-weight:700;margin:0 0 12px;line-height:1.25}
@@ -502,3 +500,5 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--blue);outline-o
 .st-h4,.st-h5,.st-h6{font-weight:700}
 :root[data-ui-theme="dark"] .page h4,:root[data-ui-theme="dark"] .page h5,:root[data-ui-theme="dark"] .page h6,.page.dark-page h4,.page.dark-page h5,.page.dark-page h6{color:#f0f1f6}
 @media print{:root[data-ui-theme="dark"] .page h4,:root[data-ui-theme="dark"] .page h5,:root[data-ui-theme="dark"] .page h6,.page.dark-page h4,.page.dark-page h5,.page.dark-page h6{color:#000!important}}
+
+.ruler-marker:focus-visible{outline:2px solid var(--blue);outline-offset:-1px;border-radius:3px}

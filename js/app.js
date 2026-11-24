@@ -643,6 +643,7 @@ function setZoom(z) {
   wrap.style.transform = `scale(${scale})`;
   wrap.style.marginBottom = `${(scale - 1) * 1056}px`;
   $$('#zoomMenu button').forEach(b => b.classList.toggle('active', +b.dataset.zoom === z));
+  buildRuler();
   save();
 }
 
@@ -793,7 +794,7 @@ const MENUS = [
     { icon: 'search', label: 'Search menus', shortcut: 'Ctrl+/', fn: commandPalette },
   ]},
   { label: 'Extensions', items: [
-    { icon: 'center_focus_strong', label: 'Focus mode', fn: () => { document.body.classList.toggle('focus-mode'); toast(document.body.classList.contains('focus-mode') ? 'Focus mode on' : 'Focus mode off', 'center_focus_strong'); } },
+    { icon: 'center_focus_strong', label: 'Focus mode', fn: () => { document.body.classList.toggle('focus-mode'); buildRuler(); toast(document.body.classList.contains('focus-mode') ? 'Focus mode on' : 'Focus mode off', 'center_focus_strong'); } },
     { icon: 'dark_mode', label: 'Dark page', fn: () => togglePageTheme('dark') },
   ]},
   { label: 'Help', items: [
@@ -1340,39 +1341,93 @@ function showProfile() {
 }
 
 /* ─────────────────────────── Ruler ─────────────────────────── */
+// The ruler uses the rendered page, not the window, as its coordinate system.
+// Stored margins remain document-space pixels; narrow screens display a scaled
+// version without modifying the saved values.
+function marginDisplayScale() { return innerWidth <= 600 ? 28 / 72 : 1; }
+function marginValue(side) {
+  const raw = state.margins?.[side];
+  const n = Number(raw);
+  return raw !== null && raw !== undefined && raw !== '' && Number.isFinite(n) && n >= 0 ? n : 72;
+}
+function pageGeometry() {
+  const rect = page.getBoundingClientRect();
+  const style = getComputedStyle(page);
+  const scale = rect.width / page.offsetWidth;
+  if (!Number.isFinite(scale) || scale <= 0) return null;
+  return { rect, scale, borderLeft: parseFloat(style.borderLeftWidth) || 0, borderRight: parseFloat(style.borderRightWidth) || 0 };
+}
 function buildRuler() {
-  const ticks = $('#rulerTicks');
-  const w = $('#ruler').clientWidth;
-  const pxPerInch = 96;
+  const factor = marginDisplayScale();
+  page.style.paddingLeft = (marginValue('left') * factor) + 'px';
+  page.style.paddingRight = (marginValue('right') * factor) + 'px';
+  const ruler = $('#ruler').getBoundingClientRect();
+  const viewport = $('#pageScroll').getBoundingClientRect();
+  const geometry = pageGeometry();
+  if (!geometry || !ruler.width) return;
+  const { rect, scale, borderLeft, borderRight } = geometry;
+  const visibleLeft = Math.max(ruler.left, viewport.left);
+  const visibleRight = Math.min(ruler.right, viewport.left + $('#pageScroll').clientWidth);
+  const pageLeft = rect.left - ruler.left;
+  const pageWidth = page.offsetWidth;
   let html = '';
-  for (let x = 0; x <= w; x += pxPerInch / 8) {
-    const inch = x / pxPerInch;
-    const major = Math.abs(inch - Math.round(inch)) < 0.01;
-    html += `<span class="tick ${major ? 'major' : 'minor'}" style="left:${x}px"></span>`;
-    if (major && Math.round(inch) >= 1) html += `<span class="tick-label" style="left:${x}px">${Math.round(inch)}</span>`;
+  for (let x = 0; x <= pageWidth; x += 12) {
+    const position = pageLeft + x * scale;
+    const screenX = ruler.left + position;
+    if (screenX < visibleLeft || screenX > visibleRight) continue;
+    const major = x % 96 === 0;
+    html += `<span class="tick ${major ? 'major' : 'minor'}" style="left:${position}px"></span>`;
+    if (major && x > 0) html += `<span class="tick-label" style="left:${position}px">${x / 96}</span>`;
   }
-  ticks.innerHTML = html;
-  positionMarkers();
+  $('#rulerTicks').innerHTML = html;
+  const display = {
+    left: rect.left + (borderLeft + marginValue('left') * factor) * scale,
+    right: rect.right - (borderRight + marginValue('right') * factor) * scale,
+  };
+  for (const side of ['left', 'right']) {
+    const marker = side === 'left' ? $('#markerLeft') : $('#markerRight');
+    const screenX = display[side];
+    marker.style.left = (screenX - ruler.left - 6) + 'px';
+    marker.classList.toggle('hidden', screenX < visibleLeft || screenX > visibleRight);
+    const value = marginValue(side) * factor;
+    marker.setAttribute('aria-valuemin', String(Math.round(Math.min(24 * factor, value))));
+    marker.setAttribute('aria-valuemax', String(Math.round(Math.max(200 * factor, value))));
+    marker.setAttribute('aria-valuenow', String(Math.round(value)));
+    marker.setAttribute('aria-valuetext', `${Math.round(value)} pixels from the ${side} page edge`);
+  }
 }
-function positionMarkers() {
-  const w = $('#ruler').clientWidth;
-  const pageW = Math.min(816, w - 48);
-  const pageLeft = (w - pageW) / 2;
-  const m = state.margins;
-  $('#markerLeft').style.left = (pageLeft + m.left - 6) + 'px';
-  $('#markerRight').style.left = (pageLeft + pageW - m.right - 6) + 'px';
-  $('#markerFirstLine').style.left = (pageLeft + m.left + 18 - 6) + 'px';
-  page.style.paddingLeft = (innerWidth <= 600 ? Math.min(m.left, 28) : m.left) + 'px';
-  page.style.paddingRight = (innerWidth <= 600 ? Math.min(m.right, 28) : m.right) + 'px';
+function setPageMargin(side, value) {
+  if (!Number.isFinite(value)) return;
+  if (!state.margins || typeof state.margins !== 'object') state.margins = {};
+  state.margins[side] = Math.min(200, Math.max(24, value));
+  buildRuler();
 }
-function dragMarker(el, onMove) {
+function dragMarker(el, side) {
   el.addEventListener('pointerdown', e => {
     e.preventDefault();
     el.setPointerCapture(e.pointerId);
-    const move = ev => onMove(ev.clientX);
-    const up = () => { el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); save(); };
+    const move = ev => {
+      const g = pageGeometry();
+      if (!g) return;
+      const distance = side === 'left' ? (ev.clientX - g.rect.left) / g.scale - g.borderLeft : (g.rect.right - ev.clientX) / g.scale - g.borderRight;
+      setPageMargin(side, distance / marginDisplayScale());
+    };
+    const up = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+      save();
+    };
     el.addEventListener('pointermove', move);
     el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  });
+  el.addEventListener('keydown', e => {
+    if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+    e.preventDefault();
+    const direction = (e.key === 'ArrowRight' ? 1 : -1) * (side === 'left' ? 1 : -1);
+    setPageMargin(side, marginValue(side) + direction * (e.shiftKey ? 10 : 1) / marginDisplayScale());
+    save();
   });
 }
 
@@ -1505,34 +1560,24 @@ function init() {
   buildRuler();
   addEventListener('resize', () => { buildRuler(); closeMenus(); });
   $('#toolbar .toolbar-scroll').addEventListener('scroll', () => { $$('.tb-dropdown.open').forEach(positionToolbarMenu); });
-  $('#pageScroll').addEventListener('scroll', e => $('#editorArea').classList.toggle('scrolled', e.target.scrollTop > 2));
-
-  dragMarker($('#markerLeft'), x => {
-    const r = $('#ruler').getBoundingClientRect();
-    const pageLeft = (r.width - Math.min(816, r.width - 48)) / 2;
-    state.margins.left = Math.min(200, Math.max(24, x - r.left - pageLeft));
-    positionMarkers();
+  let lastScrollLeft = $('#pageScroll').scrollLeft;
+  $('#pageScroll').addEventListener('scroll', e => {
+    $('#editorArea').classList.toggle('scrolled', e.target.scrollTop > 2);
+    if (e.target.scrollLeft !== lastScrollLeft) { lastScrollLeft = e.target.scrollLeft; buildRuler(); }
   });
-  dragMarker($('#markerRight'), x => {
-    const r = $('#ruler').getBoundingClientRect();
-    const pageW = Math.min(816, r.width - 48);
-    const pageLeft = (r.width - pageW) / 2;
-    state.margins.right = Math.min(200, Math.max(24, pageLeft + pageW - (x - r.left)));
-    positionMarkers();
-  });
-  dragMarker($('#markerFirstLine'), x => {
-    const r = $('#ruler').getBoundingClientRect();
-    const pageLeft = (r.width - Math.min(816, r.width - 48)) / 2;
-    const indent = Math.min(96, Math.max(0, x - r.left - pageLeft - state.margins.left));
-    const block = selectionBlock();
-    if (block) block.style.textIndent = indent + 'px';
-    saveCurrentContent(); save();
-  });
+  if (typeof ResizeObserver !== 'undefined') {
+    const rulerObserver = new ResizeObserver(buildRuler);
+    rulerObserver.observe($('#editorArea'));
+    rulerObserver.observe($('#ruler'));
+    rulerObserver.observe($('#pageWrap'));
+  }
+  dragMarker($('#markerLeft'), 'left');
+  dragMarker($('#markerRight'), 'right');
 
   loadTabContent();
   renderTree();
   setZoom(state.zoom || 100);
-  positionMarkers();
+  buildRuler();
   // open the panel on small screens via the back arrow area; default open on desktop
   if (innerWidth > 900) $('#tabsPanel').classList.add('open');
 }
