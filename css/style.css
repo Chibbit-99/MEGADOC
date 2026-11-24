@@ -400,3 +400,81 @@ body.toolbar-hidden .toolbar-restore{display:inline-flex}
 /* Keyboard focus is visible without adding visual noise to the workspace. */
 button:focus-visible,input:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 @media print{.page{border:0}}
+
+/* Appearance: brighter accent, clean surfaces, and a compact editorial frame. */
+:root{
+  --accent-solid:#4c50c5; --accent-hover:#373ba4; --accent-on-dark:#c6c8ff;
+  --blue:var(--accent-solid); --blue-dark:var(--accent-solid);
+  --blue-soft:color-mix(in srgb,var(--accent-solid) 15%,white);
+  --blue-pale:color-mix(in srgb,var(--accent-solid) 8%,white);
+  --bg:#edf0f8; --panel:#f8f9ff; --toolbar-bg:#f3f5fc; --hover:#e9ecf8;
+  --surface:#fff; --header:#fff; --ink:#22263a; --ink-2:#4a5063; --ink-3:#687188;
+  --line:#cfd5e5; --line-2:#e0e5f0;
+}
+:root[data-accent="ocean"]{--accent-solid:#1168ad;--accent-hover:#0b528d;--accent-on-dark:#a8d6ff}
+:root[data-accent="teal"]{--accent-solid:#08766b;--accent-hover:#075b53;--accent-on-dark:#8be2d2}
+:root[data-accent="violet"]{--accent-solid:#744bb3;--accent-hover:#593691;--accent-on-dark:#ddc2ff}
+:root[data-accent="berry"]{--accent-solid:#a13f63;--accent-hover:#7e2d4b;--accent-on-dark:#ffb7d1}
+:root[data-accent="amber"]{--accent-solid:#895c00;--accent-hover:#6c4800;--accent-on-dark:#f8ce70}
+.logo-fill{fill:var(--accent-solid)}
+.topbar,.menubar{background:var(--header)}
+.toolbar{border-top:1px solid var(--line-2);box-shadow:inset 0 -2px 0 var(--blue-soft)}
+.menus-search{background:var(--blue-soft);color:var(--blue-dark)}
+.menus-search:hover,.tb-btn:hover,.tb-select:hover,.crumb:hover,.share-btn:hover,.share-arrow:hover{background:var(--hover)}
+.tabs-search{background:var(--hover)}
+.tab-row.active,.tab-row.active:hover{background:var(--blue-soft)}
+.tab-row.active{box-shadow:inset 3px 0 0 var(--blue)}
+.crumb.current{background:var(--blue-pale)}
+.btn.primary{background:var(--accent-solid);color:#fff}
+.btn.primary:hover{background:var(--accent-hover)}
+.menu-dropdown,.context-menu,.tb-menu,.modal,.findbar,.panel-reopen,.toolbar-restore{background:var(--surface)}
+.appearance-group{margin-bottom:22px}
+.appearance-group h3{margin:0 0 10px;font-size:13px;font-weight:700;color:var(--ink)}
+.theme-choices{display:flex;gap:8px}
+.theme-choice,.accent-choice{position:relative;display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:6px;padding:10px 12px;cursor:pointer;font-size:13px;color:var(--ink);background:var(--surface)}
+.theme-choice{flex:1}
+.theme-choice:has(input:checked),.accent-choice:has(input:checked){border-color:var(--blue);background:var(--blue-pale);box-shadow:inset 0 0 0 1px var(--blue)}
+.theme-choice input,.accent-choice input{position:absolute;opacity:0;width:1px;height:1px}
+.theme-choice:has(input:focus-visible),.accent-choice:has(input:focus-visible){outline:2px solid var(--blue);outline-offset:2px}
+.theme-choice .material-symbols-outlined{font-size:19px;color:var(--blue)}
+.accent-choices{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.accent-dot{width:16px;height:16px;border-radius:50%;background:var(--swatch);flex:none}
+.appearance-note{font-size:12px;color:var(--ink-3);margin:0}
+
+/* UI dark mode also darkens the writing surface without modifying stored content. */
+:root[data-ui-theme="dark"]{
+  color-scheme:dark;
+  --blue:var(--accent-on-dark); --blue-dark:var(--accent-on-dark);
+  --blue-soft:color-mix(in srgb,var(--accent-solid) 36%,#202332);
+  --blue-pale:color-mix(in srgb,var(--accent-solid) 22%,#202332);
+  --bg:#171a24; --panel:#202430; --toolbar-bg:#262a38; --header:#202430; --surface:#292e3c;
+  --hover:#373d4f; --ink:#eef0fa; --ink-2:#d1d5e3; --ink-3:#aab2c6;
+  --line:#50596d; --line-2:#3c4456; --shadow-menu:0 5px 18px #0008; --shadow-page:0 2px 8px #0006;
+}
+:root[data-ui-theme="dark"] .ruler,:root[data-ui-theme="dark"] .statusbar{background:var(--header)}
+:root[data-ui-theme="dark"] .doc-title:focus,:root[data-ui-theme="dark"] .fontsize-input,:root[data-ui-theme="dark"] .field input,:root[data-ui-theme="dark"] .field textarea,:root[data-ui-theme="dark"] .field select,:root[data-ui-theme="dark"] .cmd-search input,:root[data-ui-theme="dark"] .tab-rename{background:var(--surface);color:var(--ink)}
+:root[data-ui-theme="dark"] .findbar input{color:var(--ink)}
+:root[data-ui-theme="dark"] .page{background:#242731;color:#f0f1f6;border-color:var(--line)}
+:root[data-ui-theme="dark"] .page h1,:root[data-ui-theme="dark"] .page h2,:root[data-ui-theme="dark"] .page h3{color:#f0f1f6}
+:root[data-ui-theme="dark"] .page blockquote{color:#d1d5e3}
+:root[data-ui-theme="dark"] .page pre,:root[data-ui-theme="dark"] .page code.inline,:root[data-ui-theme="dark"] .page .kbd,:root[data-ui-theme="dark"] .page th{background:#343a48;color:#eef0fa}
+:root[data-ui-theme="dark"] .page .callout{background:var(--blue-pale)}
+:root[data-ui-theme="dark"] .page a{color:#a8d6ff}
+:root[data-ui-theme="dark"] .page.high-contrast,:root[data-ui-theme="dark"] .page.high-contrast h1,:root[data-ui-theme="dark"] .page.high-contrast h2,:root[data-ui-theme="dark"] .page.high-contrast h3{color:#fff}
+:root[data-ui-theme="dark"] .page.high-contrast th,:root[data-ui-theme="dark"] .page.high-contrast td{border-color:#fff}
+:root[data-ui-theme="dark"] .context-menu .mi.danger,:root[data-ui-theme="dark"] .context-menu .mi.danger .material-symbols-outlined{color:#ffb4aa}
+@media(max-width:480px){.accent-choices{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media print{
+  :root[data-ui-theme="dark"] .page,:root[data-ui-theme="dark"] .page.dark-page{background:#fff!important;color:#000!important;border:0}
+  :root[data-ui-theme="dark"] .page h1,:root[data-ui-theme="dark"] .page h2,:root[data-ui-theme="dark"] .page h3{color:#000!important}
+}
+/* Maintain contrast for dark-page content and dialog keyboard hints. */
+.page.dark-page .empty-state,.page.dark-page .empty-state h1{color:#f0f1f6}
+.page.dark-page .empty-state .es-tips{color:#bec5d4}
+:root[data-ui-theme="dark"] .modal-body kbd,:root[data-ui-theme="dark"] .modal-body code{background:#343a48;color:#eef0fa}
+:root[data-ui-theme="dark"] .page .tag{color:var(--blue);background:var(--blue-pale)}
+@media print{
+  .page.dark-page h1,.page.dark-page h2,.page.dark-page h3{color:#000!important}
+  .page.dark-page blockquote{color:#333!important}
+  :root[data-ui-theme="dark"] .page blockquote{color:#333!important}
+}

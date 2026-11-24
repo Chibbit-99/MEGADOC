@@ -618,6 +618,9 @@ const MENUS = [
     { sep: true },
     { icon: 'delete_forever', label: 'Reset MegaDoc (delete all)', danger: true, fn: resetAll },
   ]},
+  { label: 'Settings', items: [
+    { icon: 'palette', label: 'Appearance…', fn: showAppearance },
+  ]},
   { label: 'Edit', items: [
     { icon: 'undo', label: 'Undo', shortcut: 'Ctrl+Z', fn: () => exec('undo') },
     { icon: 'redo', label: 'Redo', shortcut: 'Ctrl+Y', fn: () => exec('redo') },
@@ -883,6 +886,51 @@ function commandPalette() {
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter') { const first = list.querySelector('.cmd-item'); if (first) { closeModal(); cmds[+first.dataset.i].fn(); } }
   });
+}
+
+/* ─────────────────────────── Appearance ─────────────────────────── */
+const APPEARANCE_KEY = 'megadoc-appearance-v1';
+const ACCENTS = [
+  { id: 'indigo', label: 'Indigo', color: '#4c50c5' },
+  { id: 'ocean', label: 'Ocean', color: '#1168ad' },
+  { id: 'teal', label: 'Teal', color: '#08766b' },
+  { id: 'violet', label: 'Violet', color: '#744bb3' },
+  { id: 'berry', label: 'Berry', color: '#a13f63' },
+  { id: 'amber', label: 'Amber', color: '#895c00' },
+];
+let appearance = { theme: 'light', accent: 'indigo' };
+try {
+  const saved = JSON.parse(localStorage.getItem(APPEARANCE_KEY));
+  if (saved && ['light', 'dark'].includes(saved.theme)) appearance.theme = saved.theme;
+  if (saved && ACCENTS.some(a => a.id === saved.accent)) appearance.accent = saved.accent;
+} catch { /* defaults when local storage is unavailable or invalid */ }
+function applyAppearance() {
+  document.documentElement.dataset.uiTheme = appearance.theme;
+  document.documentElement.dataset.accent = appearance.accent;
+}
+function saveAppearance() {
+  applyAppearance();
+  try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(appearance)); }
+  catch { toast('Appearance could not be saved in this browser', 'error'); }
+}
+function showAppearance() {
+  openModal('Appearance', `
+    <div class="appearance-group">
+      <h3>Interface theme</h3>
+      <div class="theme-choices">
+        <label class="theme-choice"><input type="radio" name="uiTheme" value="light" ${appearance.theme === 'light' ? 'checked' : ''}><span class="material-symbols-outlined">light_mode</span><span>Light</span></label>
+        <label class="theme-choice"><input type="radio" name="uiTheme" value="dark" ${appearance.theme === 'dark' ? 'checked' : ''}><span class="material-symbols-outlined">dark_mode</span><span>Dark</span></label>
+      </div>
+    </div>
+    <div class="appearance-group">
+      <h3>Accent color</h3>
+      <div class="accent-choices">${ACCENTS.map(a => `<label class="accent-choice"><input type="radio" name="accentColor" value="${a.id}" ${appearance.accent === a.id ? 'checked' : ''}><span class="accent-dot" style="--swatch:${a.color}"></span><span>${a.label}</span></label>`).join('')}</div>
+    </div>
+    <p class="appearance-note">Appearance is saved on this device and does not change your document’s formatting.</p>`,
+    `<button class="btn primary" id="appearanceDone">Done</button>`);
+  $$('#modal [name="uiTheme"]').forEach(input => input.addEventListener('change', () => { appearance.theme = input.value; saveAppearance(); }));
+  $$('#modal [name="accentColor"]').forEach(input => input.addEventListener('change', () => { appearance.accent = input.value; saveAppearance(); }));
+  $('#appearanceDone').addEventListener('click', closeModal);
 }
 
 /* ─────────────────────────── View / theme helpers ─────────────────────────── */
@@ -1188,6 +1236,7 @@ function init() {
   document.title = `${state.docTitle || 'MegaDoc'} — MegaDoc`;
   updateAvatar();
   applyPageTheme();
+  applyAppearance();
   buildMenubar();
   buildPalettes();
   wireToolbar();
