@@ -12,12 +12,15 @@ MegaDoc is a static HTML, CSS, and JavaScript app. There is no installation or b
 python3 -m http.server 8000
 ```
 
-Open **http://localhost:8000** in a modern browser. Create your first tab, give it a name, and start writing. Use the **+** on a tab to add a subtab; nesting can continue as deep as you need. New tabs have blank pages.
+Open **http://localhost:8000** in a modern browser. Create your first tab, give it a name, and start writing. Use the **+** on a tab to add a sibling at the same level, or choose **Add subtab** from its **⋮** menu to nest tabs as deeply as you need. Double-click a tab to rename it (or use its menu). On small screens, close the tabs panel to return to the page. New tabs have blank pages.
 
 ## What you can do
 
-- **Organize notes:** add, rename, duplicate, delete, reorder, expand, collapse, and search tabs. The tab menu and drag-and-drop help manage the tree; breadcrumbs and the outline help you navigate it.
-- **Write and format:** use headings, fonts, sizes, colors, links, images, lists, checklists, alignment, tables, and other rich-text tools. Find text within the current tab with **Ctrl+F** (or **Cmd+F**).
+- **Organize notes:** add, rename, duplicate, delete, reorder, expand, collapse, and search tabs. In a tab’s **⋮** menu, choose **Change emoji icon** to pick an icon or type or paste your own; remove it from the same dialog. The tab menu and drag-and-drop help manage the tree; breadcrumbs and the outline help you navigate it.
+- **Write and format:** use headings, fonts, sizes, colors, links, images, lists, checklists, alignment, tables, and other rich-text tools. Active inline formatting is highlighted in the toolbar; Clear formatting removes inline styling and links from selected text, or resets formatting for the next text at the caret. It also resets a heading or quote when the selection is within that single block; multi-block structures such as tables and lists are preserved. Enter after or within a heading or quote starts a normal paragraph; Shift+Enter inserts a line break instead. Find text within the current tab with **Ctrl+F** (or **Cmd+F**).
+- **Choose colors:** use the text and highlight palettes, or enter a six-digit hex value or select a custom color.
+- **Edit images:** click an image to show its delete button and resize handle. Drag the handle, or focus it and use the left/right arrow keys (Shift for larger steps). Resize keeps the current aspect ratio; image sizes are saved in the tab. Delete can be undone using the editor Undo button; resize is saved directly and is not currently an editor Undo step.
+- **Adjust page margins:** drag the two ruler handles, or focus a handle and use the arrow keys (Shift for a larger step). The ruler follows the page when the tabs panel, zoom, or window size changes.
 - **Use Markdown shortcuts:** type one to six `#` characters followed by a space for a heading; `-`, `*`, `1.`, `>`, and `---` followed by a space make lists, a quote, or a divider. Three backticks followed by Enter or space start a code block; enter three backticks on their own line and press Enter to finish it. Inline `**bold**`, `*italic*`, `~~strikethrough~~`, backtick code, and `[text](https://example.com)` convert after a space or Enter. Turn shortcuts on or off in **Settings → Writing preferences**. These are typing shortcuts, not a full Markdown importer; existing text and pasted Markdown are not automatically converted.
 - **Work with tables:** choose dimensions and an optional header under **Insert → Table**. Right-click a cell to add or remove rows or columns, delete the table, or add a new blank header row. Tab and Shift+Tab navigate between cells. Row and column editing is unavailable for merged or uneven imported tables.
 - **Personalize the workspace:** choose a light or dark interface and an accent color under **Settings → Appearance**. Appearance and Markdown preferences are stored on this device separately from document exports.
@@ -44,4 +47,12 @@ MegaDoc currently has no online accounts, hosted sharing, live collaboration, or
 
 ## Contributing
 
-See [CONTEXT.md](CONTEXT.md) for the architecture, current data format, and the **cross-version data compatibility requirement**. There is no build step or checked-in automated test suite yet. For a syntax check, run `node --check js/app.js`; test editing, persistence, and responsive behavior in a browser before submitting changes.
+See [CONTEXT.md](CONTEXT.md) for the architecture, current data format, and the **cross-version data compatibility requirement**. There is no build step. For a syntax check, run `node --check js/app.js`. A small optional Chromium regression test covers the tab, formatting, color, and image controls; it uses a separate browser context. With a local HTTP server running and a Chromium executable installed, run:
+
+```sh
+# Install playwright-core in a separate directory if it is not already available
+npm install --prefix /tmp/megadoc-tests playwright-core
+NODE_PATH=/tmp/megadoc-tests/node_modules CHROMIUM_PATH=/path/to/chromium node tests/editor-regression.cjs
+```
+
+Set `MEGADOC_URL` if the server is not on port 8000. Also test editing, persistence, and responsive behavior manually before submitting changes; this smoke test is not a complete compatibility suite.

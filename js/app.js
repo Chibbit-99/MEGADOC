@@ -133,17 +133,17 @@ function renderTree() {
       const kidCount = descendants(id).length;
       row.innerHTML = `
         <button class="tab-chev ${hasKids ? '' : 'leaf'} ${expanded ? 'expanded' : ''}" data-act="toggle" title="${hasKids ? 'Expand/collapse' : ''}"><span class="material-symbols-outlined">chevron_right</span></button>
-        <span class="material-symbols-outlined tab-icon">${hasKids ? 'folder' : 'description'}</span>
+        ${typeof t.tabEmoji === 'string' && t.tabEmoji ? `<span class="tab-icon tab-emoji" aria-label="Tab icon">${esc(t.tabEmoji)}</span>` : `<span class="material-symbols-outlined tab-icon">${hasKids ? 'folder' : 'description'}</span>`}
         <span class="tab-title" title="${esc(t.title)}">${esc(t.title)}</span>
         ${kidCount ? `<span class="tab-badge" title="${kidCount} subtab${kidCount > 1 ? 's' : ''}">${kidCount}</span>` : ''}
-        <button class="tab-add" data-act="add" title="Add subtab"><span class="material-symbols-outlined">add</span></button>
+        <button class="tab-add" data-act="add" title="Add tab at the same level" aria-label="Add tab at the same level"><span class="material-symbols-outlined">add</span></button>
         <button class="tab-dots" data-act="menu" title="Tab options"><span class="material-symbols-outlined">more_vert</span></button>`;
       row.addEventListener('click', e => {
         const act = e.target.closest('[data-act]')?.dataset.act;
         if (act === 'toggle') { toggleExpand(id); return; }
-        if (act === 'add') { e.stopPropagation(); addTab(id); return; }
+        if (act === 'add') { e.stopPropagation(); addSiblingTab(id); return; }
         if (act === 'menu') { e.stopPropagation(); openTabMenu(id, e.currentTarget); return; }
-        selectTab(id);
+        selectTab(id, true);
       });
       row.addEventListener('dblclick', e => {
         if (e.target.closest('[data-act]')) return;
@@ -204,8 +204,8 @@ function toggleExpand(id) {
   save(); renderTree();
 }
 
-function selectTab(id) {
-  if (!getTab(id)) return;
+function selectTab(id, preserveTree = false, keepPanelOpen = false) {
+  if (!getTab(id) || (preserveTree && state.activeTabId === id)) return;
   saveCurrentContent();
   state.activeTabId = id;
   // auto-expand ancestors so the active tab is visible
@@ -216,24 +216,39 @@ function selectTab(id) {
   }
   editorRange = null; pendingFontSize = null;
   loadTabContent();
-  renderTree();
+  syncFormatButtons();
+  if (preserveTree) {
+    $$('#tabsTree .tab-row').forEach(row => row.classList.toggle('active', row.dataset.id === id));
+    renderCrumbs();
+  } else renderTree();
   save();
-  if (innerWidth <= 900) { $('#tabsPanel').classList.remove('open'); $('#panelReopen').setAttribute('aria-expanded', 'false'); }
+  if (innerWidth <= 900 && !preserveTree && !keepPanelOpen) { $('#tabsPanel').classList.remove('open'); $('#panelReopen').setAttribute('aria-expanded', 'false'); }
 }
 
-function addTab(parentId = null, title = 'Untitled tab') {
+function addTab(parentId = null, title = 'Untitled tab', afterId = null) {
   const id = uid();
   state.tabs[id] = { id, title, parentId, children: [], content: '', updatedAt: Date.now(), history: [], comments: [] };
   if (parentId && getTab(parentId)) {
-    getTab(parentId).children.push(id);
+    const siblings = getTab(parentId).children;
+    const index = afterId ? siblings.indexOf(afterId) : -1;
+    if (index >= 0) siblings.splice(index + 1, 0, id); else siblings.push(id);
     if (!state.expanded.includes(parentId)) state.expanded.push(parentId);
-  } else state.roots.push(id);
-  save(); selectTab(id);
+  } else {
+    const index = afterId ? state.roots.indexOf(afterId) : -1;
+    if (index >= 0) state.roots.splice(index + 1, 0, id); else state.roots.push(id);
+  }
+  save(); selectTab(id, false, true);
+  if (innerWidth <= 900) { $('#tabsPanel').classList.add('open'); $('#panelReopen').setAttribute('aria-expanded', 'true'); }
   requestAnimationFrame(() => {
     const row = $(`.tab-row[data-id="${id}"]`);
     if (row) startRename(id, row);
   });
   toast(parentId ? 'Subtab created' : 'Tab created', 'add_circle');
+}
+
+function addSiblingTab(id) {
+  const tab = getTab(id);
+  if (tab) addTab(tab.parentId, 'Untitled tab', id);
 }
 
 function duplicateTab(id) {
@@ -243,7 +258,7 @@ function duplicateTab(id) {
   const clone = (sid, parentId) => {
     const s = getTab(sid);
     const nid = uid();
-    state.tabs[nid] = { id: nid, title: parentId ? s.title : s.title + ' copy', parentId, children: [], content: s.content, updatedAt: Date.now(), history: [], comments: [] };
+    state.tabs[nid] = { id: nid, title: parentId ? s.title : s.title + ' copy', parentId, children: [], content: s.content, updatedAt: Date.now(), history: [], comments: [], ...(typeof s.tabEmoji === 'string' ? { tabEmoji: s.tabEmoji } : {}) };
     state.tabs[nid].children = s.children.map(c => clone(c, nid));
     return nid;
   };
@@ -303,6 +318,7 @@ function moveTabBy(id, dir) {
 function startRename(id, row) {
   const t = getTab(id);
   const titleEl = row.querySelector('.tab-title');
+  if (!t || !titleEl) return;
   const input = document.createElement('input');
   input.className = 'tab-rename';
   input.value = t.title;
@@ -330,6 +346,7 @@ function openTabMenu(id, anchor) {
   menu.innerHTML = `
     <div class="mi-label">${esc(t.title)} · depth ${depth + 1}</div>
     <button class="mi" data-a="rename"><span class="material-symbols-outlined">edit</span> Rename</button>
+    <button class="mi" data-a="icon"><span class="material-symbols-outlined">mood</span> Change emoji icon</button>
     <button class="mi" data-a="addchild"><span class="material-symbols-outlined">add_circle</span> Add subtab</button>
     <button class="mi" data-a="addroot"><span class="material-symbols-outlined">note_add</span> Add top-level tab</button>
     <button class="mi" data-a="duplicate"><span class="material-symbols-outlined">content_copy</span> Duplicate</button>
@@ -340,12 +357,14 @@ function openTabMenu(id, anchor) {
     <div class="mi-sep"></div>
     <button class="mi danger" data-a="delete"><span class="material-symbols-outlined">delete</span> Delete</button>`;
   const rect = anchor.getBoundingClientRect();
-  menu.style.left = Math.min(rect.right + 4, innerWidth - 240) + 'px';
-  menu.style.top = Math.min(rect.bottom, innerHeight - 320) + 'px';
   menu.classList.remove('hidden');
+  const menuRect = menu.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(rect.right + 4, innerWidth - menuRect.width - 8)) + 'px';
+  menu.style.top = Math.max(8, Math.min(rect.bottom, innerHeight - menuRect.height - 8)) + 'px';
   menu.querySelectorAll('[data-a]').forEach(btn => btn.addEventListener('click', () => {
     closeMenus();
     const a = btn.dataset.a;
+    if (a === 'icon') tabIconPicker(id);
     if (a === 'rename') { const row = $(`.tab-row[data-id="${id}"]`); if (row) startRename(id, row); }
     if (a === 'addchild') addTab(id);
     if (a === 'addroot') addTab(null);
@@ -359,8 +378,12 @@ function openTabMenu(id, anchor) {
 
 /* ─────────────────────────── Editor ─────────────────────────── */
 const page = $('#page');
+let selectedImage = null;
 let mode = 'editing';
 let programmaticEdit = false;
+let pendingClearRange = null;
+let clearMarker = null;
+let placingClearMarker = false;
 
 function saveCurrentContent() {
   const t = getTab(state.activeTabId);
@@ -374,6 +397,8 @@ function saveCurrentContent() {
   }
 }
 function loadTabContent() {
+  pendingClearRange = null; clearMarker = null;
+  clearImageSelection();
   const t = getTab(state.activeTabId);
   if (!t) {
     page.contentEditable = 'false';
@@ -381,7 +406,7 @@ function loadTabContent() {
       <h1>Your MegaDoc is empty</h1>
       <p>Create a tab to start writing. You can add subtabs as you go.</p>
       <button class="btn primary" id="emptyNewTab">+ Create your first tab</button>
-      <div class="es-tips">Hover a tab to add a <b>subtab</b> · double-click to rename · <span class="kbd">Ctrl</span>+<span class="kbd">/</span> for commands</div>
+      <div class="es-tips">Use a tab’s menu to add a <b>subtab</b> · double-click to rename · <span class="kbd">Ctrl</span>+<span class="kbd">/</span> for commands</div>
     </div>`;
     $('#emptyNewTab').addEventListener('click', () => addTab(null));
     updateWordCount();
@@ -404,13 +429,19 @@ function updateWordCount() {
   $('#statusWords').textContent = `${words} words`;
 }
 page.addEventListener('input', e => {
+  if (placingClearMarker) return;
+  if (clearMarker) {
+    const marker = clearMarker; clearMarker = null;
+    if (marker.isConnected) { const i = marker.data.indexOf('\u200b'); if (i >= 0) marker.deleteData(i, 1); }
+  }
   if (pendingFontSize) {
     page.querySelectorAll('font[size="7"]').forEach(font => {
       if (!pendingFontSize.existing.has(font)) { font.removeAttribute('size'); font.style.fontSize = `${pendingFontSize.size}pt`; }
     });
     pendingFontSize = null;
   }
-  saveCurrentContent(); updateWordCount(); save();
+  saveCurrentContent(); updateWordCount(); save(); syncFormatButtons();
+  if (selectedImage) updateImageControls();
   if (!programmaticEdit && !e.isComposing && (e.inputType === 'insertText' || e.inputType === 'insertFromComposition') && e.data?.endsWith(' ')) queueMicrotask(maybeApplyMarkdownAfterInput);
 });
 page.addEventListener('compositionend', () => { setTimeout(maybeApplyMarkdownAfterInput, 0); });
@@ -420,6 +451,7 @@ page.addEventListener('paste', e => {
   if (!html) return; // plain text paste is fine
   e.preventDefault();
   const text = e.clipboardData.getData('text/plain');
+  prepareClearTyping();
   programmaticEdit = true;
   try { document.execCommand('insertText', false, text); } finally { programmaticEdit = false; }
 });
@@ -517,11 +549,31 @@ function handleMarkdownKey(e) {
     break;
   }
 }
-page.addEventListener('keydown', handleMarkdownKey);
+// Enter exits a heading or quote; Shift+Enter remains a soft line break.
+function enterNormalParagraph() {
+  const sel = getSelection();
+  if (!sel.rangeCount || !page.contains(sel.anchorNode) || !page.contains(sel.focusNode)) return false;
+  const el = sel.anchorNode.nodeType === Node.ELEMENT_NODE ? sel.anchorNode : sel.anchorNode.parentElement;
+  const block = el?.closest('h1,h2,h3,h4,h5,h6,blockquote');
+  if (!block || !page.contains(block)) return false;
+  pendingClearRange = null; pendingFontSize = null;
+  programmaticEdit = true;
+  try { document.execCommand('insertParagraph'); document.execCommand('formatBlock', false, 'P'); } finally { programmaticEdit = false; }
+  if (sel.rangeCount && page.contains(sel.anchorNode)) { editorRange = sel.getRangeAt(0).cloneRange(); syncStyleLabel(sel.anchorNode); }
+  saveCurrentContent(); updateWordCount(); save(); syncFormatButtons();
+  return true;
+}
+page.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && ['b', 'i', 'u'].includes(e.key.toLowerCase())) pendingClearRange = null;
+  if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing && mode !== 'viewing' && enterNormalParagraph()) e.preventDefault();
+});
+page.addEventListener('keydown', e => { if (!e.defaultPrevented) handleMarkdownKey(e); });
+page.addEventListener('keyup', syncFormatButtons);
 // Mobile keyboards may not send meaningful keydown events; use beforeinput as a fallback.
 let handlingMarkdownInput = false;
 page.addEventListener('beforeinput', e => {
-  if (handlingMarkdownInput || e.isComposing) return;
+  if (handlingMarkdownInput || e.isComposing || e.defaultPrevented) return;
+  if (e.inputType === 'insertParagraph' && mode !== 'viewing' && enterNormalParagraph()) { e.preventDefault(); return; }
   const key = e.inputType === 'insertText' && e.data === ' ' ? ' ' : e.inputType === 'insertParagraph' ? 'Enter' : null;
   if (!key) return;
   handlingMarkdownInput = true;
@@ -549,10 +601,23 @@ let pendingFontSize = null;
 document.addEventListener('selectionchange', () => {
   const sel = getSelection();
   if (sel.rangeCount && page.contains(sel.anchorNode) && page.contains(sel.focusNode)) {
-    editorRange = sel.getRangeAt(0).cloneRange();
+    const currentRange = sel.getRangeAt(0);
+    if (pendingClearRange && (currentRange.compareBoundaryPoints(Range.START_TO_START, pendingClearRange) !== 0 || currentRange.compareBoundaryPoints(Range.END_TO_END, pendingClearRange) !== 0)) pendingClearRange = null;
+    editorRange = currentRange.cloneRange();
     syncStyleLabel(sel.anchorNode);
+    syncFormatButtons();
   }
 });
+function syncFormatButtons() {
+  const sel = getSelection();
+  const inPage = getTab(state.activeTabId) && mode !== 'viewing' && sel.rangeCount && page.contains(sel.anchorNode) && page.contains(sel.focusNode);
+  for (const [name, command] of [['bold','bold'], ['italic','italic'], ['underline','underline'], ['strike','strikeThrough'], ['bullets','insertUnorderedList'], ['numbering','insertOrderedList']]) {
+    const button = $(`#toolbar [data-cmd="${name}"]`);
+    const active = !!inPage && !pendingClearRange && document.queryCommandState(command);
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
+}
 function syncStyleLabel(node) {
   let element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
   while (element && element !== page && !/^(H[1-6]|P|BLOCKQUOTE|PRE|LI)$/.test(element.tagName)) element = element.parentElement;
@@ -563,20 +628,78 @@ function syncStyleLabel(node) {
   $$('#styleMenu button').forEach(b => b.classList.toggle('active', b.dataset.style === style));
 }
 function focusPage() {
+  const sel = getSelection();
+  const alreadyFocused = document.activeElement === page;
+  const current = sel.rangeCount ? sel.getRangeAt(0) : null;
+  const unchanged = alreadyFocused && current && editorRange &&
+    current.compareBoundaryPoints(Range.START_TO_START, editorRange) === 0 &&
+    current.compareBoundaryPoints(Range.END_TO_END, editorRange) === 0;
   page.focus();
-  if (editorRange && page.contains(editorRange.commonAncestorContainer)) {
-    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(editorRange);
+  if (!unchanged && editorRange && page.contains(editorRange.commonAncestorContainer)) {
+    sel.removeAllRanges(); sel.addRange(editorRange);
   }
 }
 function exec(cmd, val = null) {
+  pendingClearRange = null;
   if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
   focusPage();
   programmaticEdit = true;
   try { document.execCommand(cmd, false, val); } finally { programmaticEdit = false; }
   const sel = getSelection();
   if (sel.rangeCount && page.contains(sel.anchorNode)) editorRange = sel.getRangeAt(0).cloneRange();
-  saveCurrentContent(); updateWordCount(); save();
+  saveCurrentContent(); updateWordCount(); save(); syncFormatButtons();
 }
+// removeFormat on a collapsed caret does not stop inheriting ancestor styles in
+// Chromium. Defer a temporary plain-text anchor until the next input, then remove
+// it immediately after insertion so saved content never contains the marker.
+function prepareClearTyping() {
+  if (!pendingClearRange) return;
+  const sel = getSelection();
+  if (!sel.rangeCount || !sel.isCollapsed || !page.contains(sel.anchorNode) || sel.getRangeAt(0).compareBoundaryPoints(Range.START_TO_START, pendingClearRange) !== 0) { pendingClearRange = null; return; }
+  pendingClearRange = null;
+  placingClearMarker = true;
+  try {
+    document.execCommand('insertText', false, '\u200b');
+    const range = sel.getRangeAt(0).cloneRange();
+    range.setStart(range.endContainer, range.endOffset - 1);
+    sel.removeAllRanges(); sel.addRange(range);
+    document.execCommand('removeFormat'); document.execCommand('unlink');
+    sel.collapseToEnd();
+    if (sel.anchorNode.nodeType === Node.TEXT_NODE) clearMarker = sel.anchorNode;
+  } finally { placingClearMarker = false; }
+}
+page.addEventListener('beforeinput', e => {
+  if (!placingClearMarker && pendingClearRange && /^(insertText|insertCompositionText|insertFromPaste|insertFromDrop)$/.test(e.inputType)) prepareClearTyping();
+});
+function clearFormatting() {
+  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
+  focusPage(); pendingFontSize = null; pendingClearRange = null;
+  const sel = getSelection();
+  if (!sel.rangeCount || !page.contains(sel.anchorNode) || !page.contains(sel.focusNode)) return;
+  // Reset a heading or quote only when the selection stays within that block.
+  // Applying formatBlock to a multi-block selection can reorder tables/lists.
+  const blockOf = node => (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest('h1,h2,h3,h4,h5,h6,blockquote,p,li,td,th');
+  const block = blockOf(sel.anchorNode);
+  if (block && block === blockOf(sel.focusNode) && /^(H[1-6]|BLOCKQUOTE)$/.test(block.tagName)) {
+    programmaticEdit = true;
+    try { document.execCommand('formatBlock', false, 'P'); } finally { programmaticEdit = false; }
+  }
+  if (sel.isCollapsed) {
+    document.execCommand('removeFormat');
+    for (const cmd of ['bold', 'italic', 'underline', 'strikeThrough', 'subscript', 'superscript']) {
+      if (document.queryCommandState(cmd)) document.execCommand(cmd);
+    }
+    pendingClearRange = sel.getRangeAt(0).cloneRange();
+  } else {
+    programmaticEdit = true;
+    try { document.execCommand('removeFormat'); document.execCommand('unlink'); } finally { programmaticEdit = false; }
+  }
+  if (sel.rangeCount && page.contains(sel.anchorNode)) editorRange = sel.getRangeAt(0).cloneRange();
+  if (sel.rangeCount) syncStyleLabel(sel.anchorNode);
+  saveCurrentContent(); updateWordCount(); save(); syncFormatButtons();
+  toast('Formatting cleared', 'format_clear');
+}
+
 function selectionBlock() {
   const sel = getSelection();
   if (!sel.rangeCount) return null;
@@ -607,7 +730,7 @@ const toolbarActions = {
   numbering: () => exec('insertOrderedList'),
   indent: () => exec('indent'),
   outdent: () => exec('outdent'),
-  clear: () => { exec('removeFormat'); exec('unlink'); toast('Formatting cleared', 'format_clear'); },
+  clear: clearFormatting,
   'fontsize-inc': () => changeFontSize(1),
   'fontsize-dec': () => changeFontSize(-1),
 };
@@ -643,6 +766,7 @@ function setZoom(z) {
   wrap.style.transform = `scale(${scale})`;
   wrap.style.marginBottom = `${(scale - 1) * 1056}px`;
   $$('#zoomMenu button').forEach(b => b.classList.toggle('active', +b.dataset.zoom === z));
+  buildRuler();
   save();
 }
 
@@ -660,24 +784,132 @@ function setFont(name) {
   $$('#fontMenu button').forEach(b => b.classList.toggle('active', b.dataset.font === name));
 }
 
-const TEXT_COLORS = ['#000000', '#444746', '#4f46e5', '#188038', '#b3261e', '#f9ab00', '#9334e6', '#e8710a', '#0b8043', '#d93025', '#1a73e8', '#5f6368', '#ffffff', '#fbbc04', '#a8dab5', '#f28b82'];
-const HIGHLIGHTS = ['#fff59d', '#c2e7ff', '#c4eed0', '#f9dedc', '#e9defc', '#feefc3', '#ffffff', '#000000'];
-
+// A compact set of spectrum swatches plus a native picker for any RGB color.
+function hsvHex(hue, saturation, value) {
+  const chroma = value * saturation;
+  const x = chroma * (1 - Math.abs((hue / 60) % 2 - 1));
+  const m = value - chroma;
+  const [r, g, b] = hue < 60 ? [chroma, x, 0] : hue < 120 ? [x, chroma, 0] : hue < 180 ? [0, chroma, x] : hue < 240 ? [0, x, chroma] : hue < 300 ? [x, 0, chroma] : [chroma, 0, x];
+  return '#' + [r, g, b].map(n => Math.round((n + m) * 255).toString(16).padStart(2, '0')).join('');
+}
+const PALETTE_COLORS = [
+  ...Array.from({length: 10}, (_, i) => hsvHex(0, 0, 1 - i / 9)),
+  ...[ [0.28, 1], [0.5, 1], [0.75, 1], [0.95, 0.9], [0.9, 0.65], [0.8, 0.4] ]
+    .flatMap(([sat, val]) => Array.from({length: 10}, (_, i) => hsvHex(i * 36, sat, val)))
+];
 function buildPalettes() {
-  $('#colorMenu').innerHTML = '<div class="color-grid">' + TEXT_COLORS.map(c => `<button class="swatch" data-color="${c}" style="background:${c}" title="${c}"></button>`).join('') + '</div>';
-  $('#highlightMenu').innerHTML = '<div class="color-grid">' + HIGHLIGHTS.map(c => `<button class="swatch" data-color="${c}" style="background:${c}" title="${c}"></button>`).join('') + '</div>';
-  $$('#colorMenu .swatch').forEach(s => s.addEventListener('click', () => {
-    $('#colorBar').style.background = s.dataset.color;
-    exec('foreColor', s.dataset.color); closeMenus();
-  }));
-  $$('#highlightMenu .swatch').forEach(s => s.addEventListener('click', () => {
-    $('#highlightBar').style.background = s.dataset.color;
-    exec('hiliteColor', s.dataset.color); closeMenus();
-  }));
+  for (const [menuId, command, barId, label, initial] of [
+    ['colorMenu', 'foreColor', 'colorBar', 'Text color', '#000000'],
+    ['highlightMenu', 'hiliteColor', 'highlightBar', 'Highlight color', '#fff59d'],
+  ]) {
+    const menu = $('#' + menuId);
+    menu.innerHTML = `<div class="palette-title">${label}</div>
+      <div class="color-grid">${PALETTE_COLORS.map(c => `<button type="button" class="swatch" data-color="${c}" style="background:${c}" title="${c.toUpperCase()}" aria-label="${label} ${c.toUpperCase()}"></button>`).join('')}</div>
+      <div class="custom-color"><label for="${menuId}Picker">Custom</label><input id="${menuId}Picker" class="custom-color-picker" type="color" value="${initial}" aria-label="Choose custom ${label.toLowerCase()}"><input class="custom-color-hex" aria-label="${label} hex value" spellcheck="false" maxlength="7" value="${initial.toUpperCase()}"><button type="button" class="custom-color-apply">Apply</button></div>`;
+    const picker = menu.querySelector('.custom-color-picker');
+    const hex = menu.querySelector('.custom-color-hex');
+    const apply = color => {
+      if (!/^#[0-9a-f]{6}$/i.test(color)) { toast('Enter a six-digit hex color, such as #336699', 'error'); hex.focus(); return; }
+      $('#' + barId).style.background = color;
+      exec(command, color); closeMenus();
+    };
+    menu.querySelectorAll('.swatch').forEach(button => button.addEventListener('click', () => apply(button.dataset.color)));
+    picker.addEventListener('input', () => { hex.value = picker.value.toUpperCase(); });
+    hex.addEventListener('input', () => { if (/^#[0-9a-f]{6}$/i.test(hex.value)) picker.value = hex.value; });
+    hex.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); apply(hex.value.trim()); } });
+    menu.querySelector('.custom-color-apply').addEventListener('click', () => apply(hex.value.trim()));
+  }
+}
+
+/* Image controls are separate from the editable document, so merely selecting
+   an image never modifies stored HTML. Resizes are stored in the image style. */
+function clearImageSelection() {
+  selectedImage = null;
+  $('#imageControls').classList.add('hidden');
+}
+function updateImageControls() {
+  const controls = $('#imageControls');
+  if (!selectedImage || !page.contains(selectedImage) || mode === 'viewing') { clearImageSelection(); return; }
+  const rect = selectedImage.getBoundingClientRect();
+  const view = $('#pageScroll').getBoundingClientRect();
+  if (!rect.width || !rect.height || rect.right < view.left || rect.left > view.right || rect.bottom < view.top || rect.top > view.bottom) {
+    controls.classList.add('hidden'); return;
+  }
+  controls.classList.remove('hidden');
+  Object.assign(controls.style, { left: rect.left + 'px', top: rect.top + 'px', width: rect.width + 'px', height: rect.height + 'px' });
+  const top = Math.max(-18, view.top - rect.top), right = Math.max(-18, rect.right - view.right);
+  const bottom = Math.max(-18, rect.bottom - view.bottom), left = Math.max(-18, view.left - rect.left);
+  controls.style.clipPath = `inset(${top}px ${right}px ${bottom}px ${left}px)`;
+}
+function resizeSelectedImage(width, height) {
+  if (!selectedImage || !page.contains(selectedImage) || mode === 'viewing') return;
+  const container = selectedImage.closest('td,th,p,div,blockquote') || page;
+  const computed = getComputedStyle(container);
+  const available = container.clientWidth - parseFloat(computed.paddingLeft) - parseFloat(computed.paddingRight);
+  const maxWidth = Math.max(1, available);
+  const newWidth = Math.min(maxWidth, Math.max(Math.min(24, maxWidth), width));
+  if (!Number.isFinite(newWidth) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
+  selectedImage.style.width = `${Math.round(newWidth * 100) / 100}px`;
+  selectedImage.style.height = 'auto';
+  selectedImage.style.aspectRatio = `${Math.round(width * 100) / 100} / ${Math.round(height * 100) / 100}`;
+  saveCurrentContent(); updateWordCount(); save(); updateImageControls();
+}
+function deleteSelectedImage() {
+  if (!selectedImage || !page.contains(selectedImage) || mode === 'viewing') return;
+  const range = document.createRange(); range.selectNode(selectedImage);
+  page.focus(); const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+  programmaticEdit = true;
+  try { document.execCommand('insertHTML', false, ''); } finally { programmaticEdit = false; }
+  clearImageSelection();
+  editorRange = selection.rangeCount && page.contains(selection.anchorNode) ? selection.getRangeAt(0).cloneRange() : null;
+  saveCurrentContent(); updateWordCount(); save();
+}
+function wireImageControls() {
+  const controls = $('#imageControls'), resize = $('#imageResize');
+  page.addEventListener('click', e => {
+    const img = e.target.closest('img');
+    if (img && page.contains(img) && mode !== 'viewing') {
+      e.preventDefault(); selectedImage = img; updateImageControls();
+    } else clearImageSelection();
+  });
+  page.addEventListener('keydown', e => {
+    if (!selectedImage) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); e.stopPropagation(); deleteSelectedImage(); }
+    else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) clearImageSelection();
+  });
+  document.addEventListener('click', e => {
+    if (selectedImage && !page.contains(e.target) && !controls.contains(e.target)) clearImageSelection();
+  });
+  $('#imageDelete').addEventListener('click', deleteSelectedImage);
+  resize.addEventListener('pointerdown', e => {
+    if (!selectedImage) return;
+    e.preventDefault(); e.stopPropagation();
+    const image = selectedImage, bounds = image.getBoundingClientRect();
+    const scale = pageGeometry()?.scale || 1;
+    const startWidth = bounds.width / scale, startHeight = bounds.height / scale, startX = e.clientX;
+    resize.setPointerCapture(e.pointerId);
+    const move = ev => {
+      if (selectedImage !== image) return;
+      const width = startWidth + (ev.clientX - startX) / scale;
+      resizeSelectedImage(width, startHeight * Math.max(0.001, width) / startWidth);
+    };
+    const up = () => { resize.removeEventListener('pointermove', move); resize.removeEventListener('pointerup', up); resize.removeEventListener('pointercancel', up); };
+    resize.addEventListener('pointermove', move); resize.addEventListener('pointerup', up); resize.addEventListener('pointercancel', up);
+  });
+  resize.addEventListener('keydown', e => {
+    if (!selectedImage || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+    e.preventDefault();
+    const bounds = selectedImage.getBoundingClientRect(), scale = pageGeometry()?.scale || 1;
+    const width = bounds.width / scale, height = bounds.height / scale;
+    const next = Math.max(1, width + (e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 20 : 5));
+    resizeSelectedImage(next, height * next / width);
+  });
 }
 
 function setMode(m) {
   mode = m;
+  if (m === 'viewing') clearImageSelection();
+  syncFormatButtons();
   $('#modeLabel').textContent = m[0].toUpperCase() + m.slice(1);
   $$('#modeMenu button').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   document.body.classList.toggle('viewing', m === 'viewing');
@@ -793,7 +1025,7 @@ const MENUS = [
     { icon: 'search', label: 'Search menus', shortcut: 'Ctrl+/', fn: commandPalette },
   ]},
   { label: 'Extensions', items: [
-    { icon: 'center_focus_strong', label: 'Focus mode', fn: () => { document.body.classList.toggle('focus-mode'); toast(document.body.classList.contains('focus-mode') ? 'Focus mode on' : 'Focus mode off', 'center_focus_strong'); } },
+    { icon: 'center_focus_strong', label: 'Focus mode', fn: () => { document.body.classList.toggle('focus-mode'); buildRuler(); toast(document.body.classList.contains('focus-mode') ? 'Focus mode on' : 'Focus mode off', 'center_focus_strong'); } },
     { icon: 'dark_mode', label: 'Dark page', fn: () => togglePageTheme('dark') },
   ]},
   { label: 'Help', items: [
@@ -1110,6 +1342,33 @@ function showAbout() {
 }
 
 const EMOJIS = ['😀','😂','😍','🤔','👍','👎','🔥','✨','💡','📝','📌','⭐','❤️','🎉','🚀','💻','🔑','📚','🎯','✅','⚠️','🔐','🌐','🧠','📁','🗂️','🔍','💾','🗑️','➕','📎','🖼️','🔗','📊','🧪','🎨','🏠'];
+function tabIconPicker(id) {
+  if (!getTab(id)) return;
+  openModal('Tab emoji icon', `<p>Choose an emoji, or enter one of your own.</p>
+    <div class="emoji-grid tab-emoji-grid">${EMOJIS.map(e => `<button type="button" data-tab-emoji="${e}" aria-label="Use ${e}">${e}</button>`).join('')}</div>
+    <div class="tab-emoji-custom"><label for="tabEmojiInput">Your emoji</label><input id="tabEmojiInput" placeholder="Type or paste an emoji" maxlength="64" autocomplete="off"><button type="button" class="btn primary" id="tabEmojiApply">Apply</button></div>
+    <p id="tabEmojiError" class="tab-emoji-error" role="alert"></p>`,
+    `<button type="button" class="btn text" id="tabEmojiRemove">Remove icon</button><button type="button" class="btn text" id="tabEmojiCancel">Cancel</button>`);
+  const apply = emoji => {
+    const tab = getTab(id); if (!tab) { closeModal(); return; }
+    if (emoji) tab.tabEmoji = emoji; else delete tab.tabEmoji;
+    tab.updatedAt = Date.now(); save(); renderTree(); closeModal();
+  };
+  $('#modal').querySelectorAll('[data-tab-emoji]').forEach(b => b.addEventListener('click', () => apply(b.dataset.tabEmoji)));
+  const submit = () => {
+    const emoji = $('#tabEmojiInput').value.trim();
+    const graphemes = typeof Intl.Segmenter === 'function' ? [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(emoji)] : [emoji];
+    if (!emoji || emoji.length > 64 || graphemes.length !== 1 || !/[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(emoji)) {
+      $('#tabEmojiError').textContent = 'Enter one emoji.'; $('#tabEmojiInput').focus(); return;
+    }
+    apply(emoji);
+  };
+  $('#tabEmojiApply').addEventListener('click', submit);
+  $('#tabEmojiInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+  $('#tabEmojiRemove').addEventListener('click', () => apply(''));
+  $('#tabEmojiCancel').addEventListener('click', closeModal);
+}
+
 function emojiPicker() {
   openModal('Insert emoji', `<div class="emoji-grid">${EMOJIS.map(e => `<button data-e="${e}">${e}</button>`).join('')}</div>`);
   $('#modal').querySelectorAll('[data-e]').forEach(b => b.addEventListener('click', () => { exec('insertText', b.dataset.e); closeModal(); }));
@@ -1340,39 +1599,94 @@ function showProfile() {
 }
 
 /* ─────────────────────────── Ruler ─────────────────────────── */
+// The ruler uses the rendered page, not the window, as its coordinate system.
+// Stored margins remain document-space pixels; narrow screens display a scaled
+// version without modifying the saved values.
+function marginDisplayScale() { return innerWidth <= 600 ? 28 / 72 : 1; }
+function marginValue(side) {
+  const raw = state.margins?.[side];
+  const n = Number(raw);
+  return raw !== null && raw !== undefined && raw !== '' && Number.isFinite(n) && n >= 0 ? n : 72;
+}
+function pageGeometry() {
+  const rect = page.getBoundingClientRect();
+  const style = getComputedStyle(page);
+  const scale = rect.width / page.offsetWidth;
+  if (!Number.isFinite(scale) || scale <= 0) return null;
+  return { rect, scale, borderLeft: parseFloat(style.borderLeftWidth) || 0, borderRight: parseFloat(style.borderRightWidth) || 0 };
+}
 function buildRuler() {
-  const ticks = $('#rulerTicks');
-  const w = $('#ruler').clientWidth;
-  const pxPerInch = 96;
+  const factor = marginDisplayScale();
+  page.style.paddingLeft = (marginValue('left') * factor) + 'px';
+  page.style.paddingRight = (marginValue('right') * factor) + 'px';
+  if (selectedImage) updateImageControls();
+  const ruler = $('#ruler').getBoundingClientRect();
+  const viewport = $('#pageScroll').getBoundingClientRect();
+  const geometry = pageGeometry();
+  if (!geometry || !ruler.width) return;
+  const { rect, scale, borderLeft, borderRight } = geometry;
+  const visibleLeft = Math.max(ruler.left, viewport.left);
+  const visibleRight = Math.min(ruler.right, viewport.left + $('#pageScroll').clientWidth);
+  const pageLeft = rect.left - ruler.left;
+  const pageWidth = page.offsetWidth;
   let html = '';
-  for (let x = 0; x <= w; x += pxPerInch / 8) {
-    const inch = x / pxPerInch;
-    const major = Math.abs(inch - Math.round(inch)) < 0.01;
-    html += `<span class="tick ${major ? 'major' : 'minor'}" style="left:${x}px"></span>`;
-    if (major && Math.round(inch) >= 1) html += `<span class="tick-label" style="left:${x}px">${Math.round(inch)}</span>`;
+  for (let x = 0; x <= pageWidth; x += 12) {
+    const position = pageLeft + x * scale;
+    const screenX = ruler.left + position;
+    if (screenX < visibleLeft || screenX > visibleRight) continue;
+    const major = x % 96 === 0;
+    html += `<span class="tick ${major ? 'major' : 'minor'}" style="left:${position}px"></span>`;
+    if (major && x > 0) html += `<span class="tick-label" style="left:${position}px">${x / 96}</span>`;
   }
-  ticks.innerHTML = html;
-  positionMarkers();
+  $('#rulerTicks').innerHTML = html;
+  const display = {
+    left: rect.left + (borderLeft + marginValue('left') * factor) * scale,
+    right: rect.right - (borderRight + marginValue('right') * factor) * scale,
+  };
+  for (const side of ['left', 'right']) {
+    const marker = side === 'left' ? $('#markerLeft') : $('#markerRight');
+    const screenX = display[side];
+    marker.style.left = (screenX - ruler.left - 6) + 'px';
+    marker.classList.toggle('hidden', screenX < visibleLeft || screenX > visibleRight);
+    const value = marginValue(side) * factor;
+    marker.setAttribute('aria-valuemin', String(Math.round(Math.min(24 * factor, value))));
+    marker.setAttribute('aria-valuemax', String(Math.round(Math.max(200 * factor, value))));
+    marker.setAttribute('aria-valuenow', String(Math.round(value)));
+    marker.setAttribute('aria-valuetext', `${Math.round(value)} pixels from the ${side} page edge`);
+  }
 }
-function positionMarkers() {
-  const w = $('#ruler').clientWidth;
-  const pageW = Math.min(816, w - 48);
-  const pageLeft = (w - pageW) / 2;
-  const m = state.margins;
-  $('#markerLeft').style.left = (pageLeft + m.left - 6) + 'px';
-  $('#markerRight').style.left = (pageLeft + pageW - m.right - 6) + 'px';
-  $('#markerFirstLine').style.left = (pageLeft + m.left + 18 - 6) + 'px';
-  page.style.paddingLeft = (innerWidth <= 600 ? Math.min(m.left, 28) : m.left) + 'px';
-  page.style.paddingRight = (innerWidth <= 600 ? Math.min(m.right, 28) : m.right) + 'px';
+function setPageMargin(side, value) {
+  if (!Number.isFinite(value)) return;
+  if (!state.margins || typeof state.margins !== 'object') state.margins = {};
+  state.margins[side] = Math.min(200, Math.max(24, value));
+  buildRuler();
 }
-function dragMarker(el, onMove) {
+function dragMarker(el, side) {
   el.addEventListener('pointerdown', e => {
     e.preventDefault();
     el.setPointerCapture(e.pointerId);
-    const move = ev => onMove(ev.clientX);
-    const up = () => { el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); save(); };
+    const move = ev => {
+      const g = pageGeometry();
+      if (!g) return;
+      const distance = side === 'left' ? (ev.clientX - g.rect.left) / g.scale - g.borderLeft : (g.rect.right - ev.clientX) / g.scale - g.borderRight;
+      setPageMargin(side, distance / marginDisplayScale());
+    };
+    const up = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+      save();
+    };
     el.addEventListener('pointermove', move);
     el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  });
+  el.addEventListener('keydown', e => {
+    if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+    e.preventDefault();
+    const direction = (e.key === 'ArrowRight' ? 1 : -1) * (side === 'left' ? 1 : -1);
+    setPageMargin(side, marginValue(side) + direction * (e.shiftKey ? 10 : 1) / marginDisplayScale());
+    save();
   });
 }
 
@@ -1485,7 +1799,7 @@ function wireKeyboard() {
     if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveCurrentContent(); save(true); toast('Saved', 'cloud_done'); }
     if (mod && e.key.toLowerCase() === 'f') { e.preventDefault(); findInTab(); }
     if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); linkModal(); }
-    if (e.key === 'Escape') { closeModal(); closeFind(); }
+    if (e.key === 'Escape') { closeModal(); closeFind(); clearImageSelection(); }
   });
 }
 
@@ -1499,40 +1813,32 @@ function init() {
   buildMenubar();
   buildPalettes();
   wireToolbar();
+  wireImageControls();
   wireTopbar();
   wirePanel();
   wireKeyboard();
   buildRuler();
   addEventListener('resize', () => { buildRuler(); closeMenus(); });
   $('#toolbar .toolbar-scroll').addEventListener('scroll', () => { $$('.tb-dropdown.open').forEach(positionToolbarMenu); });
-  $('#pageScroll').addEventListener('scroll', e => $('#editorArea').classList.toggle('scrolled', e.target.scrollTop > 2));
-
-  dragMarker($('#markerLeft'), x => {
-    const r = $('#ruler').getBoundingClientRect();
-    const pageLeft = (r.width - Math.min(816, r.width - 48)) / 2;
-    state.margins.left = Math.min(200, Math.max(24, x - r.left - pageLeft));
-    positionMarkers();
+  let lastScrollLeft = $('#pageScroll').scrollLeft;
+  $('#pageScroll').addEventListener('scroll', e => {
+    $('#editorArea').classList.toggle('scrolled', e.target.scrollTop > 2);
+    if (selectedImage) updateImageControls();
+    if (e.target.scrollLeft !== lastScrollLeft) { lastScrollLeft = e.target.scrollLeft; buildRuler(); }
   });
-  dragMarker($('#markerRight'), x => {
-    const r = $('#ruler').getBoundingClientRect();
-    const pageW = Math.min(816, r.width - 48);
-    const pageLeft = (r.width - pageW) / 2;
-    state.margins.right = Math.min(200, Math.max(24, pageLeft + pageW - (x - r.left)));
-    positionMarkers();
-  });
-  dragMarker($('#markerFirstLine'), x => {
-    const r = $('#ruler').getBoundingClientRect();
-    const pageLeft = (r.width - Math.min(816, r.width - 48)) / 2;
-    const indent = Math.min(96, Math.max(0, x - r.left - pageLeft - state.margins.left));
-    const block = selectionBlock();
-    if (block) block.style.textIndent = indent + 'px';
-    saveCurrentContent(); save();
-  });
+  if (typeof ResizeObserver !== 'undefined') {
+    const rulerObserver = new ResizeObserver(buildRuler);
+    rulerObserver.observe($('#editorArea'));
+    rulerObserver.observe($('#ruler'));
+    rulerObserver.observe($('#pageWrap'));
+  }
+  dragMarker($('#markerLeft'), 'left');
+  dragMarker($('#markerRight'), 'right');
 
   loadTabContent();
   renderTree();
   setZoom(state.zoom || 100);
-  positionMarkers();
+  buildRuler();
   // open the panel on small screens via the back arrow area; default open on desktop
   if (innerWidth > 900) $('#tabsPanel').classList.add('open');
 }
