@@ -15,7 +15,6 @@ const esc = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '
 function seedState() {
   return {
     docTitle: 'MegaDoc',
-    starred: false,
     activeTabId: null,
     roots: [],
     tabs: {},
@@ -23,7 +22,7 @@ function seedState() {
     margins: { left: 72, right: 72 },
     zoom: 100,
     people: [],
-    profile: { name: 'MegaDoc user', color: '#4f46e5' },
+    profile: { name: 'MegaDoc user', color: '#4d5d85' },
     pageTheme: { dark: false, contrast: false },
   };
 }
@@ -36,7 +35,7 @@ function normalizeState(s) {
   s.margins = s.margins || { left: 72, right: 72 };
   s.zoom = s.zoom || 100;
   s.people = Array.isArray(s.people) ? s.people : [];
-  s.profile = s.profile || { name: 'MegaDoc user', color: '#4f46e5' };
+  s.profile = s.profile || { name: 'MegaDoc user', color: '#4d5d85' };
   s.pageTheme = s.pageTheme || { dark: false, contrast: false };
   for (const t of Object.values(s.tabs)) {
     t.children = Array.isArray(t.children) ? t.children : [];
@@ -59,7 +58,7 @@ let saveTimer;
 function save(immediate = false) {
   const status = $('#saveStatus');
   status.classList.add('saving');
-  status.innerHTML = '<span class="material-symbols-outlined">cloud_upload</span> Saving…';
+  status.textContent = 'Saving…';
   const write = () => {
     try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (err) {
       status.classList.remove('saving');
@@ -68,8 +67,7 @@ function save(immediate = false) {
       return;
     }
     status.classList.remove('saving');
-    status.innerHTML = '<span class="material-symbols-outlined">cloud_done</span> Saved';
-    $('#cloudStatus').innerHTML = '<span class="material-symbols-outlined">cloud_done</span>';
+    status.textContent = 'Saved locally';
   };
   clearTimeout(saveTimer);
   if (immediate) write(); else saveTimer = setTimeout(write, 400);
@@ -379,9 +377,8 @@ function loadTabContent() {
   if (!t) {
     page.contentEditable = 'false';
     page.innerHTML = `<div class="empty-state">
-      <div class="es-logo"><svg viewBox="0 0 32 32" width="72" height="72"><defs><linearGradient id="esg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6366f1"/><stop offset="1" stop-color="#3730a3"/></linearGradient></defs><rect width="32" height="32" rx="7" fill="url(#esg)"/><path d="M9 23V9h4.2l2.8 6.2L18.8 9H23v14h-3.6V13.4L16 20.6h-.2L12.4 13.4V23H9z" fill="#fff"/></svg></div>
       <h1>Your MegaDoc is empty</h1>
-      <p>One document. Infinite nesting. Zero file management. Create your first tab and start putting everything in one place.</p>
+      <p>Create a tab to start writing. You can add subtabs as you go.</p>
       <button class="btn primary" id="emptyNewTab">+ Create your first tab</button>
       <div class="es-tips">Hover a tab to add a <b>subtab</b> · double-click to rename · <span class="kbd">Ctrl</span>+<span class="kbd">/</span> for commands</div>
     </div>`;
@@ -1012,11 +1009,11 @@ function showComments() {
 function updateAvatar() {
   const av = $('#avatarBtn');
   av.textContent = (state.profile.name || 'M')[0].toUpperCase();
-  av.style.background = state.profile.color || '#4f46e5';
+  av.style.background = state.profile.color || '#4d5d85';
   av.title = state.profile.name;
 }
 function showProfile() {
-  const colors = ['#4f46e5', '#0f766e', '#b3261e', '#9334e6', '#e8710a', '#188038', '#5f6368'];
+  const colors = ['#4d5d85', '#0f766e', '#b3261e', '#9334e6', '#e8710a', '#188038', '#5f6368'];
   openModal('Your profile', `
     <div class="profile-preview"><span class="avatar" id="profAvatar" style="background:${state.profile.color}">${esc((state.profile.name || 'M')[0].toUpperCase())}</span>
       <div><div style="font-weight:500">${esc(state.profile.name)}</div><div style="font-size:12px;color:var(--ink-3)">Stored locally in this browser</div></div></div>
@@ -1033,23 +1030,6 @@ function showProfile() {
     toast('Profile saved', 'account_circle');
   });
   $('#mDone').addEventListener('click', closeModal);
-}
-
-function showMove() {
-  const sizeKB = Math.max(1, Math.round(JSON.stringify(state).length / 1024));
-  openModal('Document settings', `
-    <div class="field"><label>Document title</label><input id="moveTitle" value="${esc(state.docTitle)}" /></div>
-    <p>MegaDoc lives in this browser (${sizeKB} KB stored). Use Export / Import to move it to another device.</p>`,
-    `<button class="btn text" id="mExport">Export JSON</button><button class="btn text" id="mImport">Import…</button><button class="btn primary" id="mSave">Save</button>`);
-  $('#mSave').addEventListener('click', () => {
-    state.docTitle = $('#moveTitle').value.trim() || 'MegaDoc';
-    $('#docTitle').value = state.docTitle;
-    document.title = `${state.docTitle} — MegaDoc`;
-    save(); closeModal();
-    toast('Document renamed', 'folder');
-  });
-  $('#mExport').addEventListener('click', () => { closeModal(); exportJSON(); });
-  $('#mImport').addEventListener('click', () => { closeModal(); $('#importFile').click(); });
 }
 
 /* ─────────────────────────── Ruler ─────────────────────────── */
@@ -1139,14 +1119,6 @@ function wireToolbar() {
 
 function wireTopbar() {
   $('#docTitle').addEventListener('input', e => { state.docTitle = e.target.value; save(); document.title = `${state.docTitle} — MegaDoc`; });
-  $('#starBtn').addEventListener('click', () => {
-    state.starred = !state.starred;
-    $('#starBtn').classList.toggle('active', state.starred);
-    $('#starBtn .material-symbols-outlined').textContent = state.starred ? 'star' : 'star';
-    $('#starBtn .material-symbols-outlined').style.fontVariationSettings = state.starred ? "'FILL' 1,'wght' 400,'GRAD' 0,'opsz' 24" : '';
-    save(); toast(state.starred ? 'Starred' : 'Unstarred', 'star');
-  });
-  $('#moveBtn').addEventListener('click', showMove);
   $('#shareBtn').addEventListener('click', showShare);
   $('#shareArrow').addEventListener('click', showShare);
   $('#historyBtn').addEventListener('click', showHistory);
@@ -1214,10 +1186,6 @@ function wireKeyboard() {
 function init() {
   $('#docTitle').value = state.docTitle || 'MegaDoc';
   document.title = `${state.docTitle || 'MegaDoc'} — MegaDoc`;
-  if (state.starred) {
-    $('#starBtn').classList.add('active');
-    $('#starBtn .material-symbols-outlined').style.fontVariationSettings = "'FILL' 1,'wght' 400,'GRAD' 0,'opsz' 24";
-  }
   updateAvatar();
   applyPageTheme();
   buildMenubar();
