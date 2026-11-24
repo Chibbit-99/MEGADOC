@@ -4,220 +4,55 @@
    own rich-text page. Everything persists in localStorage.
    ═══════════════════════════════════════════════════════════════ */
 
-const LS_KEY = 'megadoc-v1';
+const LS_KEY = 'megadoc-v2';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const uid = () => Math.random().toString(36).slice(2, 9);
 const esc = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-/* ─────────────────────────── Seed data ─────────────────────────── */
+/* ─────────────────────────── Seed data ───────────────────────────
+   MegaDoc starts empty — no example tabs. Your first tab is yours. */
 function seedState() {
-  const tabs = {};
-  const mk = (title, parentId, content) => {
-    const id = uid();
-    tabs[id] = { id, title, parentId, children: [], content, updatedAt: Date.now() };
-    return id;
-  };
-  const roots = [];
-
-  const home = mk('home', null,
-    `<h1>Welcome to MegaDoc</h1>
-     <p><b>MegaDoc</b> is a software for putting all your notes in one document when you are too lazy to manage 15 billion of them.</p>
-     <p>Instead of 15 billion files, you get <b>one document</b> with <b>tabs, subtabs and subsubtabs</b> — as deep as you want. Every tab is its own page, but everything lives together, searchable and saved in your browser.</p>
-     <div class="callout"><b>How it works:</b> use the <b>+</b> on the left to add a tab, hover any tab to add a <b>subtab</b>, and keep nesting. Click a tab to open its page. Drag tabs to reorder. Right-click (or ⋮) to rename, duplicate or delete.</div>
-     <h2>Quick start</h2>
-     <ul>
-       <li>Click <b>+</b> next to <i>Document tabs</i> to create a new top-level tab.</li>
-       <li>Hover a tab and press <b>+</b> to create a subtab inside it.</li>
-       <li>Double-click a tab title to rename it inline.</li>
-       <li>Use <span class="kbd">Ctrl</span>+<span class="kbd">B</span> / <span class="kbd">I</span> / <span class="kbd">U</span> for bold, italic, underline.</li>
-       <li>Press <span class="kbd">Ctrl</span>+<span class="kbd">/</span> to search all menus and commands.</li>
-     </ul>
-     <h2>Why one doc?</h2>
-     <p>Tabs keep things tidy. Subtabs keep related stuff together. Subsubtabs let you go as deep as your brain does — <i>without</i> ever leaving this one document. No folders, no 15 billion files, no "where did I put that note?"</p>
-     <p><span class="tag">megadoc</span><span class="tag">one doc</span><span class="tag">tabs</span><span class="tag">subtabs</span></p>`);
-  roots.push(home);
-
-  const welcome = mk('welcome', home,
-    `<h1>Welcome 👋</h1>
-     <p>This is a <b>subtab</b> of <i>home</i>. It lives inside home, but opens as its own full page.</p>
-     <p>Try adding a subtab here — that becomes a <b>subsubtab</b>. And a subtab inside <i>that</i> becomes a sub-sub-subtab. There is no depth limit.</p>
-     <blockquote>One document. Infinite nesting. Zero file management.</blockquote>`);
-  tabs[home].children.push(welcome);
-
-  const getting = mk('getting started', welcome,
-    `<h1>Getting started</h1>
-     <h2>1. Create tabs</h2>
-     <p>Top-level tabs are your big buckets. Everything else nests underneath.</p>
-     <h2>2. Write</h2>
-     <p>Each tab has a full rich-text page: headings, lists, tables, images, links, code blocks. Use the toolbar above or the <i>Menus</i> search.</p>
-     <h2>3. Organise</h2>
-     <p>Drag tabs to reorder. Use the ⋮ menu to move, duplicate or delete. Search tabs with the search box in the sidebar.</p>
-     <h2>4. Everything saves automatically</h2>
-     <p>Your document is stored locally in this browser. Use <b>File → Export JSON</b> to back it up or move it to another device.</p>`);
-  tabs[welcome].children.push(getting);
-
-  const changelog = mk('changelog', home,
-    `<h1>Changelog</h1>
-     <h2>v1.0 — MegaDoc launches</h2>
-     <ul>
-       <li>Google Docs–style editor with ruler, toolbar and menus.</li>
-       <li>Unlimited tab nesting (tabs → subtabs → subsubtabs).</li>
-       <li>Drag-and-drop tab reordering.</li>
-       <li>Auto-save to localStorage, JSON export/import.</li>
-       <li>Command palette via <span class="kbd">Ctrl</span>+<span class="kbd">/</span>.</li>
-     </ul>`);
-  tabs[home].children.push(changelog);
-
-  const freeApi = mk('free ai api…', null,
-    `<h1>Free AI APIs</h1>
-     <p>Notes on free-tier AI APIs — endpoints, limits and keys. <i>(Placeholder content — paste your own notes here.)</i></p>
-     <h2>Providers</h2>
-     <ul>
-       <li><b>Pollinations</b> — free image + text generation. See the <i>pollinations</i> subtab.</li>
-       <li><b>Groq</b> — fast inference. See the <i>groq</i> subtab.</li>
-       <li><b>NVIDIA</b> — NIM endpoints. See the <i>nvidia</i> tab.</li>
-     </ul>
-     <p>Tip: keep keys in the <i>keys vault</i> subtab, not in public docs.</p>`);
-  roots.push(freeApi);
-
-  const providers = mk('providers', freeApi,
-    `<h1>Providers</h1>
-     <table>
-       <tr><th>Provider</th><th>What</th><th>Free tier</th></tr>
-       <tr><td>Pollinations</td><td>Images + text</td><td>Generous, no key needed for basic use</td></tr>
-       <tr><td>Groq</td><td>Fast LLM inference</td><td>Free tier with API key</td></tr>
-       <tr><td>NVIDIA NIM</td><td>Hosted models</td><td>Free credits on signup</td></tr>
-     </table>`);
-  tabs[freeApi].children.push(providers);
-
-  const poll = mk('pollinations', providers,
-    `<h1>Pollinations</h1>
-     <p>Free image generation via URL. Example pattern:</p>
-     <pre>https://gen.pollinations.ai/image/{prompt}?key=YOUR_KEY</pre>
-     <p>Replace <code class="inline">YOUR_KEY</code> with your own key. Keep keys private.</p>`);
-  tabs[providers].children.push(poll);
-
-  const groq = mk('groq', providers,
-    `<h1>Groq</h1>
-     <p>Groq API keys start with <code class="inline">gsk_</code>. Base URL: <code class="inline">https://api.groq.com/openai/v1</code></p>
-     <p>Store your key in the vault subtab and never commit it to git.</p>`);
-  tabs[providers].children.push(groq);
-
-  const vault = mk('keys vault', freeApi,
-    `<h1>Keys vault 🔐</h1>
-     <p><b>Private.</b> Keep API keys here, not in shared documents.</p>
-     <pre>PROVIDER=your-key-here
-PROVIDER_2=your-key-here</pre>
-     <p>Remember: anything in this browser stays on this device unless you export it.</p>`);
-  tabs[freeApi].children.push(vault);
-
-  const randomKeys = mk('random api keys', null,
-    `<h1>Random API keys</h1>
-     <p>Scratch space for random keys and tokens. <i>Placeholder — replace with your own.</i></p>
-     <pre>service-a: paste-key-here
-service-b: paste-key-here</pre>`);
-  roots.push(randomKeys);
-
-  const nvidiaSub = mk('nvidia', randomKeys,
-    `<h1>NVIDIA</h1>
-     <p>NVIDIA API keys start with <code class="inline">nvapi-</code>. Get them from <a href="https://build.nvidia.com" target="_blank" rel="noopener">build.nvidia.com</a>.</p>`);
-  tabs[randomKeys].children.push(nvidiaSub);
-
-  const groqSub = mk('groq', randomKeys,
-    `<h1>Groq</h1>
-     <p>Groq keys start with <code class="inline">gsk_</code>. Get them from <a href="https://console.groq.com" target="_blank" rel="noopener">console.groq.com</a>.</p>`);
-  tabs[randomKeys].children.push(groqSub);
-
-  const legacy = mk('normos ddos hack legacy', null,
-    `<h1>Normos DDoS hack legacy</h1>
-     <p>Legacy notes. Archived here so they don't clutter the main tabs.</p>
-     <p><i>Nothing to see here — yet.</i></p>`);
-  roots.push(legacy);
-
-  const legacyNotes = mk('notes', legacy,
-    `<h1>Legacy notes</h1>
-     <p>Old ideas, dead links and forgotten experiments. Everything still searchable from one place.</p>`);
-  tabs[legacy].children.push(legacyNotes);
-
-  const chibbit = mk('chibbit ai models', null,
-    `<h1>Chibbit AI models</h1>
-     <p>Model notes for the Chibbit project.</p>
-     <ul>
-       <li><b>Model A</b> — fast, cheap, good for drafts.</li>
-       <li><b>Model B</b> — smarter, slower, good for final output.</li>
-     </ul>
-     <p>Add a subtab per model as you experiment.</p>`);
-  roots.push(chibbit);
-
-  const modelsList = mk('models list', chibbit,
-    `<h1>Models list</h1>
-     <table>
-       <tr><th>Model</th><th>Use</th><th>Notes</th></tr>
-       <tr><td>model-a</td><td>Drafts</td><td>Fast</td></tr>
-       <tr><td>model-b</td><td>Final</td><td>Smart</td></tr>
-     </table>`);
-  tabs[chibbit].children.push(modelsList);
-
-  const aiKeys = mk('ai api keys', null,
-    `<h1>AI API keys</h1>
-     <p>Central list of AI provider keys. <i>Placeholder — add your own.</i></p>
-     <pre>openai: sk-...
-anthropic: sk-ant-...
-groq: gsk_...
-nvidia: nvapi-...</pre>`);
-  roots.push(aiKeys);
-
-  const searchHtml = mk('search html', null,
-    `<h1>Search HTML</h1>
-     <p>Notes on HTML search / scraping patterns.</p>
-     <pre>&lt;!-- example --&gt;
-&lt;div class="result"&gt;…&lt;/div&gt;</pre>`);
-  roots.push(searchHtml);
-
-  const sidebar = mk('sidebar', null,
-    `<h1>Sidebar</h1>
-     <p>Ideas for the sidebar UI. The MegaDoc tabs panel on the left is the living example.</p>`);
-  roots.push(sidebar);
-
-  const providers2 = mk('free ai api providers', null,
-    `<h1>Free AI API providers</h1>
-     <p>See <i>free ai api… → providers</i> for the full breakdown.</p>`);
-  roots.push(providers2);
-
-  const nvidia = mk('nvidia', null,
-    `<h1>NVIDIA</h1>
-     <p>NVIDIA NIM notes. Keys start with <code class="inline">nvapi-</code>.</p>`);
-  roots.push(nvidia);
-
-  const scraper = mk('google ai mode scraper', null,
-    `<h1>Google AI Mode scraper</h1>
-     <p>Notes on scraping Google AI Mode results.</p>
-     <ul>
-       <li>Use a headless browser for reliable rendering.</li>
-       <li>Respect rate limits.</li>
-       <li>Store results as JSON in a subtab.</li>
-     </ul>`);
-  roots.push(scraper);
-
   return {
     docTitle: 'MegaDoc',
     starred: false,
-    activeTabId: home,
-    roots,
-    tabs,
-    expanded: [home, freeApi, providers, randomKeys, legacy, chibbit],
+    activeTabId: null,
+    roots: [],
+    tabs: {},
+    expanded: [],
     margins: { left: 72, right: 72 },
     zoom: 100,
+    people: [],
+    profile: { name: 'MegaDoc user', color: '#4f46e5' },
+    pageTheme: { dark: false, contrast: false },
   };
+}
+
+function normalizeState(s) {
+  if (!s || typeof s !== 'object') return seedState();
+  s.roots = Array.isArray(s.roots) ? s.roots : [];
+  s.tabs = s.tabs && typeof s.tabs === 'object' ? s.tabs : {};
+  s.expanded = Array.isArray(s.expanded) ? s.expanded : [];
+  s.margins = s.margins || { left: 72, right: 72 };
+  s.zoom = s.zoom || 100;
+  s.people = Array.isArray(s.people) ? s.people : [];
+  s.profile = s.profile || { name: 'MegaDoc user', color: '#4f46e5' };
+  s.pageTheme = s.pageTheme || { dark: false, contrast: false };
+  for (const t of Object.values(s.tabs)) {
+    t.children = Array.isArray(t.children) ? t.children : [];
+    t.history = Array.isArray(t.history) ? t.history : [];
+    t.comments = Array.isArray(t.comments) ? t.comments : [];
+    if (typeof t.content !== 'string') t.content = '<p>Start writing…</p>';
+  }
+  if (s.activeTabId && !s.tabs[s.activeTabId]) s.activeTabId = s.roots[0] || null;
+  return s;
 }
 
 /* ─────────────────────────── Store ─────────────────────────── */
 let state;
 try {
   const raw = localStorage.getItem(LS_KEY);
-  state = raw ? JSON.parse(raw) : seedState();
-  if (!state.tabs || !state.tabs[state.activeTabId]) state = seedState();
+  state = raw ? normalizeState(JSON.parse(raw)) : seedState();
 } catch { state = seedState(); }
 
 let saveTimer;
@@ -226,7 +61,12 @@ function save(immediate = false) {
   status.classList.add('saving');
   status.innerHTML = '<span class="material-symbols-outlined">cloud_upload</span> Saving…';
   const write = () => {
-    try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch {}
+    try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (err) {
+      status.classList.remove('saving');
+      status.textContent = 'Save failed — storage full or unavailable';
+      toast('Save failed. Export your document to avoid losing changes.', 'error');
+      return;
+    }
     status.classList.remove('saving');
     status.innerHTML = '<span class="material-symbols-outlined">cloud_done</span> Saved';
     $('#cloudStatus').innerHTML = '<span class="material-symbols-outlined">cloud_done</span>';
@@ -349,7 +189,12 @@ function renderTree() {
 
   build(state.roots, 0, tree);
   if (!tree.children.length) {
-    tree.innerHTML = '<div class="empty-tree"><span class="material-symbols-outlined">search_off</span>No tabs match your search.</div>';
+    if (totalTabs() === 0) {
+      tree.innerHTML = '<div class="empty-tree"><span class="material-symbols-outlined">folder_open</span>No tabs yet.<br><button class="btn primary" id="treeNewTab" style="margin-top:10px">+ New tab</button></div>';
+      $('#treeNewTab').addEventListener('click', () => addTab(null));
+    } else {
+      tree.innerHTML = '<div class="empty-tree"><span class="material-symbols-outlined">search_off</span>No tabs match your search.</div>';
+    }
   }
   $('#statusTabs').textContent = `${totalTabs()} tab${totalTabs() === 1 ? '' : 's'}`;
   renderCrumbs();
@@ -371,15 +216,16 @@ function selectTab(id) {
     if (!state.expanded.includes(cur.parentId)) state.expanded.push(cur.parentId);
     cur = getTab(cur.parentId);
   }
+  editorRange = null;
   loadTabContent();
   renderTree();
   save();
-  $('#tabsPanel').classList.remove('open');
+  if (innerWidth <= 900) $('#tabsPanel').classList.remove('open');
 }
 
 function addTab(parentId = null, title = 'Untitled tab') {
   const id = uid();
-  state.tabs[id] = { id, title, parentId, children: [], content: `<h1>${esc(title)}</h1><p>Start writing…</p>`, updatedAt: Date.now() };
+  state.tabs[id] = { id, title, parentId, children: [], content: `<h1>${esc(title)}</h1><p>Start writing…</p>`, updatedAt: Date.now(), history: [], comments: [] };
   if (parentId && getTab(parentId)) {
     getTab(parentId).children.push(id);
     if (!state.expanded.includes(parentId)) state.expanded.push(parentId);
@@ -399,7 +245,7 @@ function duplicateTab(id) {
   const clone = (sid, parentId) => {
     const s = getTab(sid);
     const nid = uid();
-    state.tabs[nid] = { id: nid, title: parentId ? s.title : s.title + ' copy', parentId, children: [], content: s.content, updatedAt: Date.now() };
+    state.tabs[nid] = { id: nid, title: parentId ? s.title : s.title + ' copy', parentId, children: [], content: s.content, updatedAt: Date.now(), history: [], comments: [] };
     state.tabs[nid].children = s.children.map(c => clone(c, nid));
     return nid;
   };
@@ -424,12 +270,6 @@ function deleteTab(id) {
       remove(id);
       if (state.activeTabId === id || !getTab(state.activeTabId)) {
         state.activeTabId = state.roots[0] || null;
-        if (!state.activeTabId) {
-          const nid = uid();
-          state.tabs[nid] = { id: nid, title: 'home', parentId: null, children: [], content: '<h1>home</h1><p>Start writing…</p>', updatedAt: Date.now() };
-          state.roots.push(nid);
-          state.activeTabId = nid;
-        }
       }
       save(); loadTabContent(); renderTree();
       toast('Tab deleted', 'delete');
@@ -525,17 +365,43 @@ let mode = 'editing';
 
 function saveCurrentContent() {
   const t = getTab(state.activeTabId);
-  if (t) { t.content = page.innerHTML; t.updatedAt = Date.now(); }
+  if (t && t.content !== page.innerHTML) {
+    t.history ||= [];
+    if (!t.history.length || t.history[t.history.length - 1].content !== t.content) {
+      t.history.push({ t: t.updatedAt || Date.now(), content: t.content });
+      if (t.history.length > 25) t.history.shift();
+    }
+    t.content = page.innerHTML; t.updatedAt = Date.now();
+  }
 }
 function loadTabContent() {
   const t = getTab(state.activeTabId);
-  page.innerHTML = t ? t.content : '<p>Start writing…</p>';
+  if (!t) {
+    page.contentEditable = 'false';
+    page.innerHTML = `<div class="empty-state">
+      <div class="es-logo"><svg viewBox="0 0 32 32" width="72" height="72"><defs><linearGradient id="esg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6366f1"/><stop offset="1" stop-color="#3730a3"/></linearGradient></defs><rect width="32" height="32" rx="7" fill="url(#esg)"/><path d="M9 23V9h4.2l2.8 6.2L18.8 9H23v14h-3.6V13.4L16 20.6h-.2L12.4 13.4V23H9z" fill="#fff"/></svg></div>
+      <h1>Your MegaDoc is empty</h1>
+      <p>One document. Infinite nesting. Zero file management. Create your first tab and start putting everything in one place.</p>
+      <button class="btn primary" id="emptyNewTab">+ Create your first tab</button>
+      <div class="es-tips">Hover a tab to add a <b>subtab</b> · double-click to rename · <span class="kbd">Ctrl</span>+<span class="kbd">/</span> for commands</div>
+    </div>`;
+    $('#emptyNewTab').addEventListener('click', () => addTab(null));
+    updateWordCount();
+    $('#statusTab').textContent = 'No tab selected';
+    return;
+  }
+  page.contentEditable = mode === 'viewing' ? 'false' : 'true';
+  editorRange = null;
+  page.innerHTML = t.content;
   updateWordCount();
-  $('#statusTab').textContent = `Tab: ${t ? t.title : '—'}`;
+  $('#statusTab').textContent = `Tab: ${t.title}`;
 }
 function updateWordCount() {
-  const text = page.innerText.replace(/\s+/g, ' ').trim();
-  const words = text ? text.split(' ').length : 0;
+  let words = 0;
+  if (getTab(state.activeTabId)) {
+    const text = page.innerText.replace(/\s+/g, ' ').trim();
+    words = text ? text.split(' ').length : 0;
+  }
   $('#wordCount').textContent = `${words} word${words === 1 ? '' : 's'}`;
   $('#statusWords').textContent = `${words} words`;
 }
@@ -564,8 +430,19 @@ function renderCrumbs() {
 }
 
 /* ─────────────────────────── Formatting ─────────────────────────── */
-function focusPage() { page.focus(); }
+let editorRange = null;
+document.addEventListener('selectionchange', () => {
+  const sel = getSelection();
+  if (sel.rangeCount && page.contains(sel.anchorNode) && page.contains(sel.focusNode)) editorRange = sel.getRangeAt(0).cloneRange();
+});
+function focusPage() {
+  page.focus();
+  if (editorRange && page.contains(editorRange.commonAncestorContainer)) {
+    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(editorRange);
+  }
+}
 function exec(cmd, val = null) {
+  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
   focusPage();
   document.execCommand(cmd, false, val);
   saveCurrentContent(); updateWordCount(); save();
@@ -587,20 +464,15 @@ const toolbarActions = {
     page.spellcheck = !on;
     toast(on ? 'Spellcheck off' : 'Spellcheck on', 'spellcheck');
   },
-  paint: () => toast('Paint format: select text, then click Paint format, then select target text', 'format_paint'),
+  paint: paintFormat,
   bold: () => exec('bold'),
   italic: () => exec('italic'),
   underline: () => exec('underline'),
   strike: () => exec('strikeThrough'),
-  link: () => {
-    const url = prompt('Insert link URL:', 'https://');
-    if (url) exec('createLink', url);
-  },
-  image: () => {
-    const url = prompt('Image URL:', 'https://');
-    if (url) exec('insertImage', url);
-  },
-  checklist: () => exec('insertUnorderedList'),
+  link: linkModal,
+  image: imageModal,
+  checklist: () => exec('insertHTML', '<ul class="checklist"><li><input type="checkbox" contenteditable="false"> Task</li></ul><p><br></p>'),
+
   bullets: () => exec('insertUnorderedList'),
   numbering: () => exec('insertOrderedList'),
   indent: () => exec('indent'),
@@ -643,7 +515,7 @@ function setFont(name) {
   $$('#fontMenu button').forEach(b => b.classList.toggle('active', b.dataset.font === name));
 }
 
-const TEXT_COLORS = ['#000000', '#444746', '#1a73e8', '#188038', '#b3261e', '#f9ab00', '#9334e6', '#e8710a', '#0b8043', '#d93025', '#1a73e8', '#5f6368', '#ffffff', '#fbbc04', '#a8dab5', '#f28b82'];
+const TEXT_COLORS = ['#000000', '#444746', '#4f46e5', '#188038', '#b3261e', '#f9ab00', '#9334e6', '#e8710a', '#0b8043', '#d93025', '#1a73e8', '#5f6368', '#ffffff', '#fbbc04', '#a8dab5', '#f28b82'];
 const HIGHLIGHTS = ['#fff59d', '#c2e7ff', '#c4eed0', '#f9dedc', '#e9defc', '#feefc3', '#ffffff', '#000000'];
 
 function buildPalettes() {
@@ -664,10 +536,39 @@ function setMode(m) {
   $('#modeLabel').textContent = m[0].toUpperCase() + m.slice(1);
   $$('#modeMenu button').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
   document.body.classList.toggle('viewing', m === 'viewing');
-  page.contentEditable = m === 'viewing' ? 'false' : 'true';
+  page.contentEditable = m === 'viewing' || !getTab(state.activeTabId) ? 'false' : 'true';
+  $('#modeBanner').classList.toggle('show', m === 'suggesting');
   toast(m === 'viewing' ? 'Viewing mode — editing disabled' : m === 'suggesting' ? 'Suggesting mode' : 'Editing mode', 'edit');
 }
 
+let paintedFormat = null;
+function paintFormat() {
+  if (!getTab(state.activeTabId)) { toast('Create a tab first', 'error'); return; }
+  focusPage();
+  paintedFormat = { bold: document.queryCommandState('bold'), italic: document.queryCommandState('italic'), underline: document.queryCommandState('underline') };
+  toast('Select text to apply the copied formatting', 'format_paint');
+}
+page.addEventListener('mouseup', () => {
+  if (!paintedFormat || getSelection().isCollapsed || mode === 'viewing') return;
+  for (const cmd of ['bold','italic','underline']) if (document.queryCommandState(cmd) !== paintedFormat[cmd]) document.execCommand(cmd);
+  paintedFormat = null; saveCurrentContent(); save(); toast('Formatting applied', 'format_paint');
+});
+page.addEventListener('click', e => {
+  if (e.target.matches('.checklist input[type=checkbox]') && mode !== 'viewing') {
+    e.target.toggleAttribute('checked', e.target.checked); saveCurrentContent(); save();
+  }
+});
+function clipboardCommand(command) {
+  if (!getTab(state.activeTabId) || (command === 'cut' && mode === 'viewing')) { toast('Open an editable tab first', 'error'); return; }
+  focusPage();
+  if (!document.execCommand(command)) toast(`Browser blocked ${command}. Use your keyboard shortcut instead.`, 'content_copy');
+  else if (command === 'cut') { saveCurrentContent(); updateWordCount(); save(); }
+}
+async function pasteAction() {
+  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'error'); return; }
+  try { const text = await navigator.clipboard.readText(); exec('insertText', text); }
+  catch { toast('Clipboard access unavailable. Use Ctrl+V or your browser paste shortcut.', 'content_paste'); }
+}
 /* ─────────────────────────── Menus ─────────────────────────── */
 function closeMenus() {
   $('#contextMenu').classList.add('hidden');
@@ -687,6 +588,7 @@ const MENUS = [
     { sep: true },
     { icon: 'download', label: 'Export as JSON', fn: exportJSON },
     { icon: 'upload', label: 'Import JSON…', fn: () => $('#importFile').click() },
+    { icon: 'restore', label: 'Restore previous local document…', fn: restoreLegacy },
     { sep: true },
     { icon: 'print', label: 'Print', shortcut: 'Ctrl+P', fn: () => toolbarActions.print() },
     { icon: 'info', label: 'Document details', fn: showDetails },
@@ -697,18 +599,18 @@ const MENUS = [
     { icon: 'undo', label: 'Undo', shortcut: 'Ctrl+Z', fn: () => exec('undo') },
     { icon: 'redo', label: 'Redo', shortcut: 'Ctrl+Y', fn: () => exec('redo') },
     { sep: true },
-    { icon: 'content_cut', label: 'Cut', shortcut: 'Ctrl+X', fn: () => exec('cut') },
-    { icon: 'content_copy', label: 'Copy', shortcut: 'Ctrl+C', fn: () => exec('copy') },
-    { icon: 'content_paste', label: 'Paste', shortcut: 'Ctrl+V', fn: () => exec('paste') },
+    { icon: 'content_cut', label: 'Cut', shortcut: 'Ctrl+X', fn: () => clipboardCommand('cut') },
+    { icon: 'content_copy', label: 'Copy', shortcut: 'Ctrl+C', fn: () => clipboardCommand('copy') },
+    { icon: 'content_paste', label: 'Paste', shortcut: 'Ctrl+V', fn: pasteAction },
     { sep: true },
     { icon: 'select_all', label: 'Select all', shortcut: 'Ctrl+A', fn: () => exec('selectAll') },
     { icon: 'find_replace', label: 'Find in tab', shortcut: 'Ctrl+F', fn: findInTab },
   ]},
   { label: 'View', items: [
-    { icon: 'view_sidebar', label: 'Toggle tabs panel', fn: () => $('#tabsPanel').classList.toggle('open') },
+    { icon: 'view_sidebar', label: 'Toggle tabs panel', fn: () => togglePanel() },
     { icon: 'zoom_in', label: 'Zoom in', shortcut: 'Ctrl++', fn: () => setZoom(Math.min(200, state.zoom + 25)) },
     { icon: 'zoom_out', label: 'Zoom out', shortcut: 'Ctrl+-', fn: () => setZoom(Math.max(50, state.zoom - 25)) },
-    { icon: 'fullscreen', label: 'Full screen', fn: () => document.documentElement.requestFullscreen?.().catch(() => {}) },
+    { icon: 'fullscreen', label: 'Toggle full screen', fn: async () => { try { if (document.fullscreenElement) await document.exitFullscreen(); else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen(); else toast('Full screen is unavailable in this browser', 'info'); } catch { toast('Full screen is unavailable here', 'info'); } } },
     { icon: 'keyboard_arrow_up', label: 'Hide toolbar', fn: () => document.body.classList.add('toolbar-hidden') },
   ]},
   { label: 'Insert', items: [
@@ -743,7 +645,7 @@ const MENUS = [
   ]},
   { label: 'Extensions', items: [
     { icon: 'center_focus_strong', label: 'Focus mode', fn: () => { document.body.classList.toggle('focus-mode'); toast(document.body.classList.contains('focus-mode') ? 'Focus mode on' : 'Focus mode off', 'center_focus_strong'); } },
-    { icon: 'dark_mode', label: 'Dark page', fn: () => { page.style.background = page.style.background === 'rgb(32, 33, 36)' ? '' : '#202124'; page.style.color = page.style.background === 'rgb(32, 33, 36)' ? '#e8eaed' : ''; toast('Dark page toggled', 'dark_mode'); } },
+    { icon: 'dark_mode', label: 'Dark page', fn: () => togglePageTheme('dark') },
   ]},
   { label: 'Help', items: [
     { icon: 'keyboard', label: 'Keyboard shortcuts', fn: showShortcuts },
@@ -751,7 +653,7 @@ const MENUS = [
   ]},
   { label: 'Accessibility', items: [
     { icon: 'format_size', label: 'Larger text', fn: () => setZoom(Math.min(200, state.zoom + 25)) },
-    { icon: 'contrast', label: 'High contrast page', fn: () => { page.style.filter = page.style.filter ? '' : 'contrast(1.15)'; toast('High contrast toggled', 'contrast'); } },
+    { icon: 'contrast', label: 'High contrast page', fn: () => togglePageTheme('contrast') },
   ]},
 ];
 
@@ -790,12 +692,35 @@ function insertTable() {
   exec('insertHTML', '<table><tr><th>Header 1</th><th>Header 2</th><th>Header 3</th></tr><tr><td>Cell</td><td>Cell</td><td>Cell</td></tr><tr><td>Cell</td><td>Cell</td><td>Cell</td></tr></table><p><br></p>');
   toast('Table inserted', 'table');
 }
+let findIndex = -1;
 function findInTab() {
-  const q = prompt('Find in this tab:');
-  if (!q) return;
-  const found = page.innerHTML.toLowerCase().includes(q.toLowerCase());
-  toast(found ? `Found "${q}" in this tab` : `"${q}" not found in this tab`, found ? 'search' : 'search_off');
+  if (!getTab(state.activeTabId)) { toast('Create a tab first', 'search_off'); return; }
+  $('#findbar').classList.add('open'); $('#findInput').focus(); $('#findInput').select(); runFind();
 }
+function findRanges(q) {
+  const walker = document.createTreeWalker(page, NodeFilter.SHOW_TEXT);
+  const nodes = []; let text = '', node;
+  while ((node = walker.nextNode())) { nodes.push({node, start: text.length}); text += node.data; }
+  const ranges = []; const needle = q.toLowerCase(); const haystack = text.toLowerCase();
+  if (!needle) return ranges;
+  let pos = 0, hit;
+  while ((hit = haystack.indexOf(needle, pos)) !== -1) {
+    const start = nodes.find(n => hit >= n.start && hit < n.start + n.node.length);
+    const end = nodes.find(n => hit + needle.length > n.start && hit + needle.length <= n.start + n.node.length);
+    if (start && end) { const r = document.createRange(); r.setStart(start.node, hit - start.start); r.setEnd(end.node, hit + needle.length - end.start); ranges.push(r); }
+    pos = hit + needle.length;
+  }
+  return ranges;
+}
+function showFindResult(ranges) {
+  $('#findCount').textContent = ranges.length ? `${findIndex + 1} / ${ranges.length}` : ($('#findInput').value ? 'No matches' : '');
+  if (ranges.length) { const sel = getSelection(); sel.removeAllRanges(); sel.addRange(ranges[findIndex]); ranges[findIndex].startContainer.parentElement?.scrollIntoView({block:'nearest'}); }
+}
+function runFind() { const ranges = findRanges($('#findInput').value); findIndex = ranges.length ? 0 : -1; showFindResult(ranges); }
+function findStep(dir) { const ranges = findRanges($('#findInput').value); if (!ranges.length) return; findIndex = (findIndex + dir + ranges.length) % ranges.length; showFindResult(ranges); }
+function closeFind() { $('#findbar').classList.remove('open'); }
+
+
 function exportJSON() {
   saveCurrentContent();
   const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
@@ -806,10 +731,22 @@ function exportJSON() {
   URL.revokeObjectURL(a.href);
   toast('Exported as JSON', 'download');
 }
+function restoreLegacy() {
+  let old;
+  try { old = JSON.parse(localStorage.getItem('megadoc-v1')); } catch {}
+  if (!old || !old.tabs || !Array.isArray(old.roots)) { toast('No previous local document found', 'info'); return; }
+  confirmModal('Restore previous document?', '<p>This replaces your current document with the previous locally saved version, which may include the old example tabs. Export your current document first if needed.</p>', 'Restore', () => {
+    state = normalizeState(old); $('#docTitle').value = state.docTitle || 'MegaDoc';
+    updateAvatar(); applyPageTheme(); loadTabContent(); renderTree(); setZoom(state.zoom || 100); save(true);
+    toast('Previous document restored', 'restore');
+  });
+}
 function resetAll() {
-  confirmModal('Reset MegaDoc?', '<p>This deletes <b>all tabs and content</b> stored in this browser and restores the starter document. Export a backup first if you need it.</p>', 'Reset everything', () => {
+  confirmModal('Reset MegaDoc?', '<p>This deletes <b>all tabs and content</b> stored in this browser and starts a new empty document. Export a backup first if you need it.</p>', 'Reset everything', () => {
     localStorage.removeItem(LS_KEY);
     state = seedState();
+    $('#docTitle').value = state.docTitle; document.title = 'MegaDoc — MegaDoc';
+    updateAvatar(); applyPageTheme();
     save(true); loadTabContent(); renderTree(); setZoom(state.zoom || 100);
     toast('MegaDoc reset', 'restart_alt');
   });
@@ -835,17 +772,10 @@ function confirmModal(title, bodyHTML, confirmLabel, onConfirm) {
 }
 
 function showShare() {
-  const link = `https://megadoc.local/${state.docTitle.toLowerCase().replace(/\s+/g, '-')}/${state.activeTabId}`;
-  openModal('Share “' + state.docTitle + '”', `
-    <p>Anyone with this link can view this document. (Demo link — MegaDoc stores everything locally in your browser.)</p>
-    <div class="field"><label>Document link</label>
-      <div class="share-link-row"><input id="shareLink" readonly value="${esc(link)}" /><button class="btn primary" id="copyLink">Copy</button></div></div>
-    <div class="field"><label>People with access</label>
-      <div class="share-link-row"><input id="shareEmail" placeholder="Add people by email…" /><button class="btn text" id="inviteBtn">Invite</button></div></div>`,
-    `<button class="btn text" id="mDone">Done</button>`);
-  $('#copyLink').addEventListener('click', () => { $('#shareLink').select(); navigator.clipboard?.writeText(link); toast('Link copied', 'link'); });
-  $('#inviteBtn').addEventListener('click', () => { const v = $('#shareEmail').value.trim(); if (v) { toast(`Invitation sent to ${v}`, 'mail'); $('#shareEmail').value = ''; } });
+  openModal('Share your MegaDoc', `<p>Your document is stored only in this browser. Live sharing and invitations are not available.</p><p>Export a JSON copy to share or move your document. The recipient can import it into MegaDoc.</p>`,
+    `<button class="btn text" id="mDone">Done</button><button class="btn primary" id="mExport">Export JSON</button>`);
   $('#mDone').addEventListener('click', closeModal);
+  $('#mExport').addEventListener('click', () => { closeModal(); exportJSON(); });
 }
 
 function showDetails() {
@@ -883,6 +813,7 @@ function showShortcuts() {
     <table>
       <tr><td><kbd>Ctrl</kbd>+<kbd>B</kbd> / <kbd>I</kbd> / <kbd>U</kbd></td><td>Bold / Italic / Underline</td></tr>
       <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd></td><td>Insert link</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Find in tab</td></tr>
       <tr><td><kbd>Ctrl</kbd>+<kbd>P</kbd></td><td>Print</td></tr>
       <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd></td><td>Undo / Redo</td></tr>
       <tr><td><kbd>Ctrl</kbd>+<kbd>/</kbd></td><td>Search menus &amp; commands</td></tr>
@@ -929,6 +860,168 @@ function commandPalette() {
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter') { const first = list.querySelector('.cmd-item'); if (first) { closeModal(); cmds[+first.dataset.i].fn(); } }
   });
+}
+
+/* ─────────────────────────── View / theme helpers ─────────────────────────── */
+function togglePanel() {
+  if (innerWidth <= 900) {
+    if (document.body.classList.contains('panel-collapsed')) { document.body.classList.remove('panel-collapsed'); $('#tabsPanel').classList.add('open'); }
+    else $('#tabsPanel').classList.toggle('open');
+    return;
+  }
+  document.body.classList.toggle('panel-collapsed');
+  buildRuler();
+}
+function togglePageTheme(kind) {
+  state.pageTheme[kind] = !state.pageTheme[kind];
+  applyPageTheme();
+  save();
+  toast(kind === 'dark' ? (state.pageTheme.dark ? 'Dark page on' : 'Dark page off') : (state.pageTheme.contrast ? 'High contrast on' : 'High contrast off'), kind === 'dark' ? 'dark_mode' : 'contrast');
+}
+function applyPageTheme() {
+  page.classList.toggle('dark-page', !!state.pageTheme.dark);
+  page.classList.toggle('high-contrast', !!state.pageTheme.contrast);
+}
+
+/* ─────────────────────────── Insert modals ─────────────────────────── */
+function linkModal() {
+  if (!getTab(state.activeTabId)) { toast('Create a tab first', 'link_off'); return; }
+  const sel = getSelection();
+  const selected = sel.rangeCount ? sel.toString() : '';
+  openModal('Insert link', `
+    <div class="field"><label>Link text</label><input id="linkText" value="${esc(selected)}" placeholder="Text to display" /></div>
+    <div class="field"><label>URL</label><input id="linkUrl" placeholder="https://…" /></div>`,
+    `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Insert link</button>`);
+  $('#linkUrl').focus();
+  $('#mCancel').addEventListener('click', closeModal);
+  const doInsert = () => {
+    const url = $('#linkUrl').value.trim();
+    const text = $('#linkText').value.trim();
+    if (!/^https?:\/\//i.test(url) && !/^mailto:/i.test(url)) { toast('Enter an http, https, or mailto URL', 'error'); return; }
+    closeModal();
+    if (!selected || (text && text !== selected)) exec('insertHTML', `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(text || url)}</a>`);
+    else exec('createLink', url);
+    toast('Link inserted', 'link');
+  };
+  $('#mOk').addEventListener('click', doInsert);
+  $('#linkUrl').addEventListener('keydown', e => { if (e.key === 'Enter') doInsert(); });
+}
+function imageModal() {
+  if (!getTab(state.activeTabId)) { toast('Create a tab first', 'image_not_supported'); return; }
+  openModal('Insert image', `
+    <div class="field"><label>Image URL</label><input id="imgUrl" placeholder="https://…" /></div>
+    <div class="field"><label>…or upload a file</label><input type="file" id="imgFile" accept="image/*" /></div>`,
+    `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Insert image</button>`);
+  $('#imgUrl').focus();
+  $('#mCancel').addEventListener('click', closeModal);
+  const doInsert = () => {
+    const url = $('#imgUrl').value.trim();
+    const file = $('#imgFile').files[0];
+    const insert = src => { closeModal(); exec('insertImage', src); toast('Image inserted', 'image'); };
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = () => insert(reader.result);
+      reader.readAsDataURL(file);
+    } else if (/^https?:\/\//i.test(url)) insert(url);
+    else toast('Enter an http or https URL, or choose a file', 'error');
+  };
+  $('#mOk').addEventListener('click', doInsert);
+}
+
+/* ─────────────────────────── History / comments / profile / move ─────────────────────────── */
+function showHistory() {
+  const t = getTab(state.activeTabId);
+  if (!t) { toast('Create a tab first', 'history'); return; }
+  const items = [...t.history].reverse().map((h, i) => {
+    const idx = t.history.length - 1 - i;
+    const preview = h.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || '(empty)';
+    return `<div class="history-item"><span class="h-avatar"><span class="material-symbols-outlined" style="font-size:16px">history</span></span>
+      <div class="h-body"><div class="h-meta">${new Date(h.t).toLocaleString()}</div><div class="h-preview">${esc(preview)}</div></div>
+      <button class="btn text" data-restore="${idx}">Restore</button></div>`;
+  }).join('');
+  openModal(`Version history — ${t.title}`, `
+    <p>Last edited ${new Date(t.updatedAt).toLocaleString()}. MegaDoc keeps the last 25 saved versions of this tab.</p>
+    ${items || '<p style="color:var(--ink-3)">No saved versions yet — keep editing and versions will appear here.</p>'}`,
+    `<button class="btn text" id="mDone">Done</button>`);
+  $('#modal').querySelectorAll('[data-restore]').forEach(b => b.addEventListener('click', () => {
+    const h = t.history[+b.dataset.restore];
+    if (!h) return;
+    t.history.push({ t: Date.now(), content: t.content });
+    if (t.history.length > 25) t.history.shift();
+    t.content = h.content; t.updatedAt = Date.now();
+    loadTabContent(); save();
+    closeModal();
+    toast('Version restored', 'history');
+  }));
+  $('#mDone').addEventListener('click', closeModal);
+}
+
+function showComments() {
+  const t = getTab(state.activeTabId);
+  if (!t) { toast('Create a tab first', 'comment'); return; }
+  const items = t.comments.map(c => `<div class="comment-item"><span class="c-avatar">${esc((c.author || 'M')[0].toUpperCase())}</span>
+    <div class="c-body"><div class="c-meta">${esc(c.author)} · ${new Date(c.t).toLocaleString()}</div><div class="c-text">${esc(c.text)}</div></div>
+    <button class="icon-btn sm" data-del="${c.id}" title="Delete comment"><span class="material-symbols-outlined">delete</span></button></div>`).join('');
+  openModal(`Comments — ${t.title} (${t.comments.length})`, `
+    ${items || '<p style="color:var(--ink-3)">No comments yet. Add the first one below.</p>'}
+    <div class="field" style="margin-top:12px"><label>New comment</label><textarea id="commentText" rows="3" placeholder="Write a comment…"></textarea></div>`,
+    `<button class="btn text" id="mDone">Done</button><button class="btn primary" id="addComment">Add comment</button>`);
+  $('#addComment').addEventListener('click', () => {
+    const text = $('#commentText').value.trim();
+    if (!text) { toast('Write something first', 'error'); return; }
+    t.comments.push({ id: uid(), text, t: Date.now(), author: state.profile.name });
+    save(); closeModal(); showComments();
+    toast('Comment added', 'comment');
+  });
+  $('#modal').querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => {
+    t.comments = t.comments.filter(c => c.id !== b.dataset.del);
+    save(); closeModal(); showComments();
+    toast('Comment deleted', 'delete');
+  }));
+  $('#mDone').addEventListener('click', closeModal);
+}
+
+function updateAvatar() {
+  const av = $('#avatarBtn');
+  av.textContent = (state.profile.name || 'M')[0].toUpperCase();
+  av.style.background = state.profile.color || '#4f46e5';
+  av.title = state.profile.name;
+}
+function showProfile() {
+  const colors = ['#4f46e5', '#0f766e', '#b3261e', '#9334e6', '#e8710a', '#188038', '#5f6368'];
+  openModal('Your profile', `
+    <div class="profile-preview"><span class="avatar" id="profAvatar" style="background:${state.profile.color}">${esc((state.profile.name || 'M')[0].toUpperCase())}</span>
+      <div><div style="font-weight:500">${esc(state.profile.name)}</div><div style="font-size:12px;color:var(--ink-3)">Stored locally in this browser</div></div></div>
+    <div class="field"><label>Display name</label><input id="profName" value="${esc(state.profile.name)}" /></div>
+    <div class="field"><label>Avatar colour</label><div class="swatch-row">${colors.map(c => `<button class="swatch" data-c="${c}" style="background:${c}"></button>`).join('')}</div></div>`,
+    `<button class="btn text" id="mDone">Done</button><button class="btn primary" id="profSave">Save</button>`);
+  $('#modal').querySelectorAll('.swatch').forEach(s => s.addEventListener('click', () => {
+    state.profile.color = s.dataset.c;
+    $('#profAvatar').style.background = s.dataset.c;
+  }));
+  $('#profSave').addEventListener('click', () => {
+    state.profile.name = $('#profName').value.trim() || 'MegaDoc user';
+    updateAvatar(); save(); closeModal();
+    toast('Profile saved', 'account_circle');
+  });
+  $('#mDone').addEventListener('click', closeModal);
+}
+
+function showMove() {
+  const sizeKB = Math.max(1, Math.round(JSON.stringify(state).length / 1024));
+  openModal('Document settings', `
+    <div class="field"><label>Document title</label><input id="moveTitle" value="${esc(state.docTitle)}" /></div>
+    <p>MegaDoc lives in this browser (${sizeKB} KB stored). Use Export / Import to move it to another device.</p>`,
+    `<button class="btn text" id="mExport">Export JSON</button><button class="btn text" id="mImport">Import…</button><button class="btn primary" id="mSave">Save</button>`);
+  $('#mSave').addEventListener('click', () => {
+    state.docTitle = $('#moveTitle').value.trim() || 'MegaDoc';
+    $('#docTitle').value = state.docTitle;
+    document.title = `${state.docTitle} — MegaDoc`;
+    save(); closeModal();
+    toast('Document renamed', 'folder');
+  });
+  $('#mExport').addEventListener('click', () => { closeModal(); exportJSON(); });
+  $('#mImport').addEventListener('click', () => { closeModal(); $('#importFile').click(); });
 }
 
 /* ─────────────────────────── Ruler ─────────────────────────── */
@@ -1014,17 +1107,16 @@ function wireTopbar() {
     $('#starBtn .material-symbols-outlined').style.fontVariationSettings = state.starred ? "'FILL' 1,'wght' 400,'GRAD' 0,'opsz' 24" : '';
     save(); toast(state.starred ? 'Starred' : 'Unstarred', 'star');
   });
-  $('#moveBtn').addEventListener('click', () => toast('MegaDoc lives in this browser — use File → Export JSON to move it', 'folder'));
+  $('#moveBtn').addEventListener('click', showMove);
   $('#shareBtn').addEventListener('click', showShare);
   $('#shareArrow').addEventListener('click', showShare);
-  $('#historyBtn').addEventListener('click', () => {
-    const t = getTab(state.activeTabId);
-    openModal('Version history', `<p>Last edited ${t ? new Date(t.updatedAt).toLocaleString() : '—'}.</p><p>MegaDoc auto-saves every change to this browser. Export JSON from the File menu for a full backup.</p>`, `<button class="btn text" id="mDone">Done</button>`);
-    $('#mDone').addEventListener('click', closeModal);
+  $('#historyBtn').addEventListener('click', showHistory);
+  $('#commentBtn').addEventListener('click', showComments);
+  $('#avatarBtn').addEventListener('click', showProfile);
+  $('#logoBtn').addEventListener('click', () => {
+    if (state.roots.length) selectTab(state.roots[0]);
+    else toast('Create your first tab to get started', 'folder_open');
   });
-  $('#commentBtn').addEventListener('click', () => toast('Comments are not in this demo — everything is already in one doc', 'comment'));
-  $('#avatarBtn').addEventListener('click', () => toast('Signed in locally as MegaDoc user', 'account_circle'));
-  $('#logoBtn').addEventListener('click', () => selectTab(state.roots[0]));
 }
 
 function wirePanel() {
@@ -1037,8 +1129,18 @@ function wirePanel() {
   $('#clearSearch').addEventListener('click', () => { searchQuery = ''; $('#tabSearch').value = ''; $('#clearSearch').classList.add('hidden'); renderTree(); });
   $('#expandAll').addEventListener('click', () => { state.expanded = Object.keys(state.tabs); save(); renderTree(); });
   $('#collapseAll').addEventListener('click', () => { state.expanded = []; save(); renderTree(); });
-  $('#panelBack').addEventListener('click', () => $('#tabsPanel').classList.remove('open'));
+  $('#panelBack').addEventListener('click', () => { if (innerWidth <= 900) $('#tabsPanel').classList.remove('open'); else togglePanel(); });
+  $('#panelReopen').addEventListener('click', () => togglePanel());
+  $('#toolbarRestore').addEventListener('click', () => document.body.classList.remove('toolbar-hidden'));
   $('#statusOutline').addEventListener('click', showOutline);
+  $('#findInput').addEventListener('input', runFind);
+  $('#findInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') findStep(e.shiftKey ? -1 : 1);
+    if (e.key === 'Escape') closeFind();
+  });
+  $('#findNext').addEventListener('click', () => findStep(1));
+  $('#findPrev').addEventListener('click', () => findStep(-1));
+  $('#findClose').addEventListener('click', closeFind);
   $('#importFile').addEventListener('change', e => {
     const file = e.target.files[0];
     if (!file) return;
@@ -1046,7 +1148,9 @@ function wirePanel() {
       try {
         const imported = JSON.parse(text);
         if (!imported.tabs || !imported.roots) throw new Error('bad file');
-        state = imported;
+        state = normalizeState(imported);
+        $('#docTitle').value = state.docTitle;
+        updateAvatar(); applyPageTheme();
         save(true); loadTabContent(); renderTree(); setZoom(state.zoom || 100);
         toast('MegaDoc imported', 'upload');
       } catch { toast('Could not import that file', 'error'); }
@@ -1061,7 +1165,9 @@ function wireKeyboard() {
     if (mod && e.key === '/') { e.preventDefault(); commandPalette(); }
     if (mod && e.altKey && e.key.toLowerCase() === 'n') { e.preventDefault(); addTab(state.activeTabId); }
     if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveCurrentContent(); save(true); toast('Saved', 'cloud_done'); }
-    if (e.key === 'Escape') closeModal();
+    if (mod && e.key.toLowerCase() === 'f') { e.preventDefault(); findInTab(); }
+    if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); linkModal(); }
+    if (e.key === 'Escape') { closeModal(); closeFind(); }
   });
 }
 
@@ -1073,6 +1179,8 @@ function init() {
     $('#starBtn').classList.add('active');
     $('#starBtn .material-symbols-outlined').style.fontVariationSettings = "'FILL' 1,'wght' 400,'GRAD' 0,'opsz' 24";
   }
+  updateAvatar();
+  applyPageTheme();
   buildMenubar();
   buildPalettes();
   wireToolbar();
