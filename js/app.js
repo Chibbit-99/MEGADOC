@@ -216,11 +216,11 @@ function selectTab(id) {
     if (!state.expanded.includes(cur.parentId)) state.expanded.push(cur.parentId);
     cur = getTab(cur.parentId);
   }
-  editorRange = null;
+  editorRange = null; pendingFontSize = null;
   loadTabContent();
   renderTree();
   save();
-  if (innerWidth <= 900) $('#tabsPanel').classList.remove('open');
+  if (innerWidth <= 900) { $('#tabsPanel').classList.remove('open'); $('#panelReopen').setAttribute('aria-expanded', 'false'); }
 }
 
 function addTab(parentId = null, title = 'Untitled tab') {
@@ -405,7 +405,15 @@ function updateWordCount() {
   $('#wordCount').textContent = `${words} word${words === 1 ? '' : 's'}`;
   $('#statusWords').textContent = `${words} words`;
 }
-page.addEventListener('input', () => { saveCurrentContent(); updateWordCount(); save(); });
+page.addEventListener('input', () => {
+  if (pendingFontSize) {
+    page.querySelectorAll('font[size="7"]').forEach(font => {
+      if (!pendingFontSize.existing.has(font)) { font.removeAttribute('size'); font.style.fontSize = `${pendingFontSize.size}pt`; }
+    });
+    pendingFontSize = null;
+  }
+  saveCurrentContent(); updateWordCount(); save();
+});
 page.addEventListener('paste', e => {
   // paste as plain text to keep the doc clean, unless it contains HTML from this doc
   const html = e.clipboardData.getData('text/html');
@@ -431,6 +439,7 @@ function renderCrumbs() {
 
 /* ─────────────────────────── Formatting ─────────────────────────── */
 let editorRange = null;
+let pendingFontSize = null;
 document.addEventListener('selectionchange', () => {
   const sel = getSelection();
   if (sel.rangeCount && page.contains(sel.anchorNode) && page.contains(sel.focusNode)) editorRange = sel.getRangeAt(0).cloneRange();
@@ -445,6 +454,8 @@ function exec(cmd, val = null) {
   if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
   focusPage();
   document.execCommand(cmd, false, val);
+  const sel = getSelection();
+  if (sel.rangeCount && page.contains(sel.anchorNode)) editorRange = sel.getRangeAt(0).cloneRange();
   saveCurrentContent(); updateWordCount(); save();
 }
 function selectionBlock() {
@@ -482,12 +493,27 @@ const toolbarActions = {
   'fontsize-dec': () => changeFontSize(-1),
 };
 
+function applyFontSize(size) {
+  size = Math.min(72, Math.max(6, Math.round(Number(size) || 12)));
+  $('#fontSizeInput').value = size;
+  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
+  focusPage();
+  // execCommand preserves the browser's editing and undo behavior across blocks.
+  // Convert only newly created size markers to the exact requested point size.
+  const existing = new Set(page.querySelectorAll('font[size="7"]'));
+  const collapsed = getSelection().isCollapsed;
+  pendingFontSize = collapsed ? { size, existing } : null;
+  document.execCommand('styleWithCSS', false, false);
+  document.execCommand('fontSize', false, '7');
+  page.querySelectorAll('font[size="7"]').forEach(font => {
+    if (!existing.has(font)) { font.removeAttribute('size'); font.style.fontSize = `${size}pt`; }
+  });
+  const sel = getSelection();
+  if (sel.rangeCount && page.contains(sel.anchorNode)) editorRange = sel.getRangeAt(0).cloneRange();
+  saveCurrentContent(); updateWordCount(); save();
+}
 function changeFontSize(delta) {
-  const input = $('#fontSizeInput');
-  let size = parseInt(input.value, 10) || 12;
-  size = Math.min(72, Math.max(6, size + delta));
-  input.value = size;
-  exec('fontSize', size > 24 ? 7 : size > 18 ? 6 : size > 14 ? 5 : size > 12 ? 4 : size > 10 ? 3 : 2);
+  applyFontSize((parseInt($('#fontSizeInput').value, 10) || 12) + delta);
 }
 
 function setZoom(z) {
@@ -867,9 +893,11 @@ function togglePanel() {
   if (innerWidth <= 900) {
     if (document.body.classList.contains('panel-collapsed')) { document.body.classList.remove('panel-collapsed'); $('#tabsPanel').classList.add('open'); }
     else $('#tabsPanel').classList.toggle('open');
+    $('#panelReopen').setAttribute('aria-expanded', String($('#tabsPanel').classList.contains('open')));
     return;
   }
   document.body.classList.toggle('panel-collapsed');
+  $('#panelReopen').setAttribute('aria-expanded', String(!document.body.classList.contains('panel-collapsed')));
   buildRuler();
 }
 function togglePageTheme(kind) {
@@ -1047,8 +1075,8 @@ function positionMarkers() {
   $('#markerLeft').style.left = (pageLeft + m.left - 6) + 'px';
   $('#markerRight').style.left = (pageLeft + pageW - m.right - 6) + 'px';
   $('#markerFirstLine').style.left = (pageLeft + m.left + 18 - 6) + 'px';
-  page.style.paddingLeft = m.left + 'px';
-  page.style.paddingRight = m.right + 'px';
+  page.style.paddingLeft = (innerWidth <= 600 ? Math.min(m.left, 28) : m.left) + 'px';
+  page.style.paddingRight = (innerWidth <= 600 ? Math.min(m.right, 28) : m.right) + 'px';
 }
 function dragMarker(el, onMove) {
   el.addEventListener('pointerdown', e => {
@@ -1062,8 +1090,19 @@ function dragMarker(el, onMove) {
 }
 
 /* ─────────────────────────── Wiring ─────────────────────────── */
+function positionToolbarMenu(dropdown) {
+  const menu = dropdown.querySelector('.tb-menu');
+  if (!menu) return;
+  const anchor = dropdown.getBoundingClientRect();
+  const rect = menu.getBoundingClientRect();
+  const left = dropdown.querySelector('.tb-menu.right') ? anchor.right - rect.width : anchor.left;
+  menu.style.left = `${Math.max(8, Math.min(left, innerWidth - rect.width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(anchor.bottom + 4, innerHeight - rect.height - 8))}px`;
+}
 function wireToolbar() {
   $$('#toolbar [data-cmd]').forEach(btn => btn.addEventListener('click', () => toolbarActions[btn.dataset.cmd]?.()));
+  // Keep the editor selection when using toolbar controls.
+  $('#toolbar').addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); });
   // dropdowns
   $$('.tb-dropdown > .tb-select, .tb-dropdown > .tb-btn').forEach(btn => {
     btn.addEventListener('click', e => {
@@ -1071,7 +1110,7 @@ function wireToolbar() {
       const dd = btn.closest('.tb-dropdown');
       const was = dd.classList.contains('open');
       closeMenus();
-      if (!was) dd.classList.add('open');
+      if (!was) { dd.classList.add('open'); positionToolbarMenu(dd); }
     });
   });
   $$('#zoomMenu button').forEach(b => b.addEventListener('click', () => { setZoom(+b.dataset.zoom); closeMenus(); }));
@@ -1079,14 +1118,14 @@ function wireToolbar() {
   $$('#fontMenu button').forEach(b => b.addEventListener('click', () => { setFont(b.dataset.font); closeMenus(); }));
   $$('#alignMenu button').forEach(b => b.addEventListener('click', () => { exec(b.dataset.align); closeMenus(); }));
   $$('#spacingMenu button').forEach(b => b.addEventListener('click', () => {
+    focusPage();
     const block = selectionBlock();
     if (block) block.style.lineHeight = b.dataset.spacing;
     saveCurrentContent(); save(); closeMenus();
   }));
   $$('#modeMenu button').forEach(b => b.addEventListener('click', () => { setMode(b.dataset.mode); closeMenus(); }));
   $('#fontSizeInput').addEventListener('change', e => {
-    const size = parseInt(e.target.value, 10) || 12;
-    exec('fontSize', size > 24 ? 7 : size > 18 ? 6 : size > 14 ? 5 : size > 12 ? 4 : size > 10 ? 3 : 2);
+    applyFontSize(e.target.value);
   });
   $('#menusSearch').addEventListener('click', commandPalette);
   $('#collapseToolbar').addEventListener('click', () => document.body.classList.add('toolbar-hidden'));
@@ -1129,7 +1168,7 @@ function wirePanel() {
   $('#clearSearch').addEventListener('click', () => { searchQuery = ''; $('#tabSearch').value = ''; $('#clearSearch').classList.add('hidden'); renderTree(); });
   $('#expandAll').addEventListener('click', () => { state.expanded = Object.keys(state.tabs); save(); renderTree(); });
   $('#collapseAll').addEventListener('click', () => { state.expanded = []; save(); renderTree(); });
-  $('#panelBack').addEventListener('click', () => { if (innerWidth <= 900) $('#tabsPanel').classList.remove('open'); else togglePanel(); });
+  $('#panelBack').addEventListener('click', () => { if (innerWidth <= 900) { $('#tabsPanel').classList.remove('open'); $('#panelReopen').setAttribute('aria-expanded', 'false'); } else togglePanel(); });
   $('#panelReopen').addEventListener('click', () => togglePanel());
   $('#toolbarRestore').addEventListener('click', () => document.body.classList.remove('toolbar-hidden'));
   $('#statusOutline').addEventListener('click', showOutline);
@@ -1188,7 +1227,8 @@ function init() {
   wirePanel();
   wireKeyboard();
   buildRuler();
-  addEventListener('resize', buildRuler);
+  addEventListener('resize', () => { buildRuler(); closeMenus(); });
+  $('#toolbar .toolbar-scroll').addEventListener('scroll', () => { $$('.tb-dropdown.open').forEach(positionToolbarMenu); });
 
   dragMarker($('#markerLeft'), x => {
     const r = $('#ruler').getBoundingClientRect();
