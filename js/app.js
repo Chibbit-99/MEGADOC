@@ -360,6 +360,7 @@ function openTabMenu(id, anchor) {
 /* ─────────────────────────── Editor ─────────────────────────── */
 const page = $('#page');
 let mode = 'editing';
+let programmaticEdit = false;
 
 function saveCurrentContent() {
   const t = getTab(state.activeTabId);
@@ -402,7 +403,7 @@ function updateWordCount() {
   $('#wordCount').textContent = `${words} word${words === 1 ? '' : 's'}`;
   $('#statusWords').textContent = `${words} words`;
 }
-page.addEventListener('input', () => {
+page.addEventListener('input', e => {
   if (pendingFontSize) {
     page.querySelectorAll('font[size="7"]').forEach(font => {
       if (!pendingFontSize.existing.has(font)) { font.removeAttribute('size'); font.style.fontSize = `${pendingFontSize.size}pt`; }
@@ -410,18 +411,54 @@ page.addEventListener('input', () => {
     pendingFontSize = null;
   }
   saveCurrentContent(); updateWordCount(); save();
+  if (!programmaticEdit && !e.isComposing && (e.inputType === 'insertText' || e.inputType === 'insertFromComposition') && e.data?.endsWith(' ')) queueMicrotask(maybeApplyMarkdownAfterInput);
 });
+page.addEventListener('compositionend', () => { setTimeout(maybeApplyMarkdownAfterInput, 0); });
 page.addEventListener('paste', e => {
   // paste as plain text to keep the doc clean, unless it contains HTML from this doc
   const html = e.clipboardData.getData('text/html');
   if (!html) return; // plain text paste is fine
   e.preventDefault();
   const text = e.clipboardData.getData('text/plain');
-  document.execCommand('insertText', false, text);
+  programmaticEdit = true;
+  try { document.execCommand('insertText', false, text); } finally { programmaticEdit = false; }
 });
 
 /* Markdown shortcuts are deliberately local to the current plain-text run.
    This avoids rewriting existing formatting or anything inside code or tables. */
+function markdownLineRange(sel) {
+  const node = sel.anchorNode;
+  const parent = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  if (!parent || parent.closest('pre,code,a,td,th,li')) return null;
+  const candidate = parent.closest('p,div,h1,h2,h3,h4,h5,h6,blockquote');
+  const block = candidate && page.contains(candidate) ? candidate : page;
+  const range = document.createRange(); range.selectNodeContents(block); range.setEnd(node, sel.anchorOffset);
+  if (node.nodeType === Node.TEXT_NODE) {
+    const newline = node.data.lastIndexOf('\n', sel.anchorOffset - 1);
+    if (newline >= 0) range.setStart(node, newline + 1);
+    else if (node.previousSibling?.nodeName === 'BR' || (node.parentNode === page && node.previousSibling && /^(P|DIV|H[1-6]|PRE|BLOCKQUOTE|UL|OL|TABLE|HR)$/.test(node.previousSibling.nodeName))) range.setStart(node, 0);
+  }
+  return range;
+}
+function applyMarkdownBlock(token, range, sel) {
+  sel.removeAllRanges(); sel.addRange(range);
+  document.execCommand('delete', false);
+  if (token[0] === '#') document.execCommand('formatBlock', false, 'H' + token.length);
+  else if (token === '>') document.execCommand('formatBlock', false, 'BLOCKQUOTE');
+  else if (token === '```') document.execCommand('formatBlock', false, 'PRE');
+  else if (token === '---') document.execCommand('insertHorizontalRule', false);
+  else document.execCommand(token === '1.' ? 'insertOrderedList' : 'insertUnorderedList', false);
+  if (sel.rangeCount && page.contains(sel.anchorNode)) { editorRange = sel.getRangeAt(0).cloneRange(); syncStyleLabel(sel.anchorNode); }
+  saveCurrentContent(); updateWordCount(); save();
+}
+function maybeApplyMarkdownAfterInput() {
+  if (!appearance.markdown || mode === 'viewing' || !getTab(state.activeTabId)) return;
+  const sel = getSelection();
+  if (!sel.rangeCount || !sel.isCollapsed || !page.contains(sel.anchorNode)) return;
+  const range = markdownLineRange(sel);
+  const match = range && /^(#{1,6}|[-*+]|1\.|>|```|---)[ \u00a0]$/.exec(range.toString());
+  if (match) applyMarkdownBlock(match[1], range, sel);
+}
 function handleMarkdownKey(e) {
   if (!appearance.markdown || mode === 'viewing' || !getTab(state.activeTabId) || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || (e.key !== ' ' && e.key !== 'Enter')) return;
   const sel = getSelection();
@@ -444,24 +481,12 @@ function handleMarkdownKey(e) {
     }
   }
   if (!parent || parent.closest('pre,code,a')) return;
-  const candidate = parent.closest('p,div,h1,h2,h3,blockquote');
-  const block = candidate && page.contains(candidate) ? candidate : page;
-  const before = document.createRange();
-  before.selectNodeContents(block); before.setEnd(node, sel.anchorOffset);
-  const prefix = before.toString();
-  const blockMatch = !parent.closest('td,th,li') && (e.key === ' ' || (e.key === 'Enter' && prefix === '```')) && /^(#{1,3}|[-*+]|1\.|>|```|---)$/.exec(prefix);
+  const before = markdownLineRange(sel);
+  const prefix = before?.toString() || '';
+  const blockMatch = before && (e.key === ' ' || (e.key === 'Enter' && prefix === '```')) && /^(#{1,6}|[-*+]|1\.|>|```|---)$/.exec(prefix);
   if (blockMatch) {
     e.preventDefault();
-    sel.removeAllRanges(); sel.addRange(before);
-    document.execCommand('delete', false);
-    const token = blockMatch[1];
-    if (token[0] === '#') document.execCommand('formatBlock', false, 'H' + token.length);
-    else if (token === '>') document.execCommand('formatBlock', false, 'BLOCKQUOTE');
-    else if (token === '```') document.execCommand('formatBlock', false, 'PRE');
-    else if (token === '---') document.execCommand('insertHorizontalRule', false);
-    else document.execCommand(token === '1.' ? 'insertOrderedList' : 'insertUnorderedList', false);
-    if (sel.rangeCount && page.contains(sel.anchorNode)) editorRange = sel.getRangeAt(0).cloneRange();
-    saveCurrentContent(); updateWordCount(); save();
+    applyMarkdownBlock(blockMatch[1], before, sel);
     return;
   }
   if (node.nodeType !== Node.TEXT_NODE) return;
@@ -523,8 +548,20 @@ let editorRange = null;
 let pendingFontSize = null;
 document.addEventListener('selectionchange', () => {
   const sel = getSelection();
-  if (sel.rangeCount && page.contains(sel.anchorNode) && page.contains(sel.focusNode)) editorRange = sel.getRangeAt(0).cloneRange();
+  if (sel.rangeCount && page.contains(sel.anchorNode) && page.contains(sel.focusNode)) {
+    editorRange = sel.getRangeAt(0).cloneRange();
+    syncStyleLabel(sel.anchorNode);
+  }
 });
+function syncStyleLabel(node) {
+  let element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+  while (element && element !== page && !/^(H[1-6]|P|BLOCKQUOTE|PRE|LI)$/.test(element.tagName)) element = element.parentElement;
+  const name = element?.tagName;
+  const style = /^H[1-6]$/.test(name || '') ? name.toLowerCase() : name === 'BLOCKQUOTE' ? 'blockquote' : name === 'PRE' ? 'code' : 'p';
+  const labels = { p: 'Normal text', h1: 'Heading 1', h2: 'Heading 2', h3: 'Heading 3', h4: 'Heading 4', h5: 'Heading 5', h6: 'Heading 6', blockquote: 'Quote', code: 'Code' };
+  $('#styleLabel').textContent = labels[style];
+  $$('#styleMenu button').forEach(b => b.classList.toggle('active', b.dataset.style === style));
+}
 function focusPage() {
   page.focus();
   if (editorRange && page.contains(editorRange.commonAncestorContainer)) {
@@ -534,7 +571,8 @@ function focusPage() {
 function exec(cmd, val = null) {
   if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
   focusPage();
-  document.execCommand(cmd, false, val);
+  programmaticEdit = true;
+  try { document.execCommand(cmd, false, val); } finally { programmaticEdit = false; }
   const sel = getSelection();
   if (sel.rangeCount && page.contains(sel.anchorNode)) editorRange = sel.getRangeAt(0).cloneRange();
   saveCurrentContent(); updateWordCount(); save();
@@ -543,7 +581,7 @@ function selectionBlock() {
   const sel = getSelection();
   if (!sel.rangeCount) return null;
   let n = sel.anchorNode;
-  while (n && !['H1','H2','H3','P','BLOCKQUOTE','PRE','LI'].includes(n.nodeName)) n = n.parentNode;
+  while (n && !['H1','H2','H3','H4','H5','H6','P','BLOCKQUOTE','PRE','LI'].includes(n.nodeName)) n = n.parentNode;
   return n;
 }
 
@@ -609,9 +647,9 @@ function setZoom(z) {
 }
 
 function setStyle(style) {
-  const map = { p: 'P', h1: 'H1', h2: 'H2', h3: 'H3', blockquote: 'BLOCKQUOTE', code: 'PRE' };
+  const map = { p: 'P', h1: 'H1', h2: 'H2', h3: 'H3', h4: 'H4', h5: 'H5', h6: 'H6', blockquote: 'BLOCKQUOTE', code: 'PRE' };
   exec('formatBlock', map[style] || 'P');
-  const labels = { p: 'Normal text', h1: 'Heading 1', h2: 'Heading 2', h3: 'Heading 3', blockquote: 'Quote', code: 'Code' };
+  const labels = { p: 'Normal text', h1: 'Heading 1', h2: 'Heading 2', h3: 'Heading 3', h4: 'Heading 4', h5: 'Heading 5', h6: 'Heading 6', blockquote: 'Quote', code: 'Code' };
   $('#styleLabel').textContent = labels[style] || 'Normal text';
   $$('#styleMenu button').forEach(b => b.classList.toggle('active', b.dataset.style === style));
 }
@@ -800,6 +838,10 @@ function openMenu(i, anchor) {
 }
 
 /* Editor context menu: native browser menus remain available outside the page. */
+function hasHeaderRow(table) {
+  const first = table?.rows[0];
+  return !!first && (first.parentElement.tagName === 'THEAD' || (first.cells.length > 0 && [...first.cells].every(c => c.tagName === 'TH' && c.getAttribute('scope') !== 'row')));
+}
 function showEditorContext(e) {
   if (!getTab(state.activeTabId) || mode === 'viewing' || e.target.closest('input,textarea,select,button')) return;
   e.preventDefault();
@@ -811,6 +853,7 @@ function showEditorContext(e) {
   const menu = $('#contextMenu');
   menu.innerHTML = (table && page.contains(table) ? `
     <div class="mi-label">Table</div>
+    ${table.rows[0] && !hasHeaderRow(table) ? '<button class="mi" data-editor-action="header-add"><span class="material-symbols-outlined">view_headline</span> Add header row</button>' : ''}
     <button class="mi" data-editor-action="row-before"><span class="material-symbols-outlined">add</span> Insert row above</button>
     <button class="mi" data-editor-action="row-after"><span class="material-symbols-outlined">add</span> Insert row below</button>
     <button class="mi" data-editor-action="col-before"><span class="material-symbols-outlined">add</span> Insert column left</button>
@@ -832,7 +875,7 @@ function showEditorContext(e) {
   menu.querySelectorAll('[data-editor-action]').forEach(button => button.addEventListener('click', () => {
     const action = button.dataset.editorAction;
     closeMenus();
-    if (['row-before','row-after','col-before','col-after','row-delete','col-delete','table-delete'].includes(action)) editTable(table, cell, action);
+    if (['header-add','row-before','row-after','col-before','col-after','row-delete','col-delete','table-delete'].includes(action)) editTable(table, cell, action);
     else if (action === 'undo') exec('undo');
     else if (action === 'cut' || action === 'copy') clipboardCommand(action);
     else if (action === 'paste') pasteAction();
@@ -850,13 +893,19 @@ function editTable(table, cell, action) {
   if (action !== 'table-delete' && rows.some(row => row.cells.length !== columns || [...row.cells].some(c => c.rowSpan !== 1 || c.colSpan !== 1))) {
     toast('Row and column editing is not supported for merged or uneven cells', 'info'); return;
   }
+  if (action === 'header-add' && hasHeaderRow(table)) { toast('This table already has a header row', 'info'); return; }
   if (action === 'row-delete' && rows.length === 1) { toast('Use Delete table to remove the last row', 'info'); return; }
   if (action === 'col-delete' && columns === 1) { toast('Use Delete table to remove the last column', 'info'); return; }
   const clone = table.cloneNode(true);
   const cloneRows = [...clone.rows];
   const cloneRow = cloneRows[rowIndex];
   const emptyCell = tag => { const el = document.createElement(tag); el.appendChild(document.createElement('br')); return el; };
-  if (action === 'row-before' || action === 'row-after') {
+  if (action === 'header-add') {
+    const row = document.createElement('tr');
+    for (let i = 0; i < columns; i++) { const header = emptyCell('th'); header.scope = 'col'; row.appendChild(header); }
+    if (clone.tHead) clone.tHead.appendChild(row);
+    else cloneRows[0].parentElement.insertBefore(row, cloneRows[0]);
+  } else if (action === 'row-before' || action === 'row-after') {
     const row = document.createElement('tr');
     for (const existing of cloneRow.cells) {
       const afterHeader = action === 'row-after' && cloneRow.parentElement.tagName !== 'THEAD' && [...cloneRow.cells].every(c => c.tagName === 'TH') && (!cloneRow.nextElementSibling || cloneRow.nextElementSibling.cells[0]?.tagName === 'TD');
@@ -909,7 +958,8 @@ function insertTable() {
     let html = '<table><tbody>';
     for (let r = 0; r < rows; r++) {
       const tag = header && r === 0 ? 'th' : 'td';
-      html += '<tr>' + `<${tag}><br></${tag}>`.repeat(cols) + '</tr>';
+      const cell = tag === 'th' ? '<th scope="col"><br></th>' : '<td><br></td>';
+      html += '<tr>' + cell.repeat(cols) + '</tr>';
     }
     html += '</tbody></table><p><br></p>';
     closeModal(); exec('insertHTML', html); toast('Table inserted', 'table');

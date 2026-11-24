@@ -495,3 +495,10 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--blue);outline-o
 .page th{font-weight:600}
 .page td:focus,.page th:focus{outline:1px solid var(--blue);outline-offset:-1px}
 @media print{.scroll-fade{display:none}.crumbbar{box-shadow:none}}
+/* Additional Markdown heading levels. */
+.page h4{font-size:13pt;margin:12px 0 6px}
+.page h5{font-size:11pt;margin:10px 0 5px}
+.page h6{font-size:10pt;margin:10px 0 5px}
+.st-h4,.st-h5,.st-h6{font-weight:700}
+:root[data-ui-theme="dark"] .page h4,:root[data-ui-theme="dark"] .page h5,:root[data-ui-theme="dark"] .page h6,.page.dark-page h4,.page.dark-page h5,.page.dark-page h6{color:#f0f1f6}
+@media print{:root[data-ui-theme="dark"] .page h4,:root[data-ui-theme="dark"] .page h5,:root[data-ui-theme="dark"] .page h6,.page.dark-page h4,.page.dark-page h5,.page.dark-page h6{color:#000!important}}
