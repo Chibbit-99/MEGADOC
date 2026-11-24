@@ -502,3 +502,28 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--blue);outline-o
 @media print{:root[data-ui-theme="dark"] .page h4,:root[data-ui-theme="dark"] .page h5,:root[data-ui-theme="dark"] .page h6,.page.dark-page h4,.page.dark-page h5,.page.dark-page h6{color:#000!important}}
 
 .ruler-marker:focus-visible{outline:2px solid var(--blue);outline-offset:-1px;border-radius:3px}
+/* Text and highlight palettes: compact, consistently sized swatches. */
+.tb-menu.color-menu{width:min(304px,calc(100vw - 16px));padding:12px;max-height:min(65vh,440px);border:1px solid var(--line-2)}
+.color-menu .palette-title{font-size:13px;font-weight:600;color:var(--ink);margin:0 0 9px}
+.color-menu .color-grid{display:grid;grid-template-columns:repeat(10,minmax(0,1fr));gap:4px}
+.tb-menu.color-menu .color-grid .swatch{display:block;width:100%;height:22px;min-width:0;padding:0;border-radius:4px;border:1px solid rgba(0,0,0,.18);box-shadow:none}
+.tb-menu.color-menu .color-grid .swatch:hover{transform:none;outline:2px solid var(--blue);outline-offset:1px}
+.color-menu .custom-color{display:flex;align-items:center;gap:7px;margin-top:12px;padding-top:10px;border-top:1px solid var(--line-2)}
+.color-menu .custom-color label{font-size:12px;color:var(--ink-2)}
+.color-menu .custom-color-picker{width:30px;height:28px;padding:0;border:1px solid var(--line);border-radius:4px;background:var(--surface);cursor:pointer}
+.color-menu .custom-color-hex{width:76px;min-width:0;height:28px;padding:3px 5px;border:1px solid var(--line);border-radius:4px;background:var(--surface);color:var(--ink);font-size:12px;text-transform:uppercase}
+.tb-menu.color-menu .custom-color-apply{display:inline-flex;width:auto;flex:1;justify-content:center;padding:6px 8px;border-radius:4px;background:var(--blue-pale);color:var(--blue-dark);font-size:12px;font-weight:500}
+/* Image selection chrome is outside the editable/saved HTML. */
+.image-controls{position:fixed;z-index:45;border:2px solid var(--blue);pointer-events:none;box-sizing:border-box}
+.image-controls button{position:absolute;pointer-events:auto;display:flex;align-items:center;justify-content:center;color:#fff;background:var(--accent-solid);border:1px solid #fff;box-shadow:0 1px 4px #0006}
+.image-delete{top:-14px;right:-14px;width:28px;height:28px;border-radius:5px}
+.image-delete .material-symbols-outlined{font-size:18px}
+.image-resize{right:-8px;bottom:-8px;width:16px;height:16px;border-radius:3px;cursor:nwse-resize;touch-action:none}
+.image-controls button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+@media print{.image-controls{display:none!important}}
+@media (hover:none), (max-width:900px){.tab-row .tab-add,.tab-row .tab-dots{display:inline-flex}}
+.tab-emoji{display:inline-flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;font-size:17px;line-height:1}
+.tab-emoji-custom{display:flex;align-items:center;gap:8px;margin-top:16px;flex-wrap:wrap}
+.tab-emoji-custom input{flex:1;min-width:140px;border:1px solid var(--line);border-radius:5px;padding:7px;background:var(--surface);color:var(--ink)}
+.tab-emoji-error{color:#b3261e;margin-top:5px}
+.tb-btn.active{box-shadow:inset 0 0 0 1px var(--blue);color:var(--blue-dark)}

@@ -6,7 +6,7 @@
 <title>MegaDoc — All your notes in one document</title>
 <meta name="description" content="MegaDoc is a software for putting all your notes in one document when you are too lazy to manage 15 billion of them." />
 <link rel="icon" type="image/svg+xml" href="assets/megadoc.svg" />
-<link rel="stylesheet" href="css/style.css?v=8" />
+<link rel="stylesheet" href="css/style.css?v=9" />
 </head>
 <body>
 
@@ -108,10 +108,10 @@
     </div>
     <span class="tb-sep"></span>
 
-    <button class="tb-btn fmt" data-cmd="bold" title="Bold (Ctrl+B)"><b>B</b></button>
-    <button class="tb-btn fmt" data-cmd="italic" title="Italic (Ctrl+I)"><i>I</i></button>
-    <button class="tb-btn fmt" data-cmd="underline" title="Underline (Ctrl+U)"><u>U</u></button>
-    <button class="tb-btn fmt" data-cmd="strike" title="Strikethrough"><s>S</s></button>
+    <button class="tb-btn fmt" data-cmd="bold" aria-pressed="false" title="Bold (Ctrl+B)"><b>B</b></button>
+    <button class="tb-btn fmt" data-cmd="italic" aria-pressed="false" title="Italic (Ctrl+I)"><i>I</i></button>
+    <button class="tb-btn fmt" data-cmd="underline" aria-pressed="false" title="Underline (Ctrl+U)"><u>U</u></button>
+    <button class="tb-btn fmt" data-cmd="strike" aria-pressed="false" title="Strikethrough"><s>S</s></button>
 
     <div class="tb-dropdown" data-dropdown="color">
       <button class="tb-btn fmt color-btn" id="colorBtn" title="Text color"><span class="color-letter">A</span><span class="color-bar" id="colorBar"></span></button>
@@ -145,8 +145,8 @@
       </div>
     </div>
     <button class="tb-btn" data-cmd="checklist" title="Checklist"><span class="material-symbols-outlined">checklist</span></button>
-    <button class="tb-btn" data-cmd="bullets" title="Bulleted list"><span class="material-symbols-outlined">format_list_bulleted</span></button>
-    <button class="tb-btn" data-cmd="numbering" title="Numbered list"><span class="material-symbols-outlined">format_list_numbered</span></button>
+    <button class="tb-btn" data-cmd="bullets" aria-pressed="false" title="Bulleted list"><span class="material-symbols-outlined">format_list_bulleted</span></button>
+    <button class="tb-btn" data-cmd="numbering" aria-pressed="false" title="Numbered list"><span class="material-symbols-outlined">format_list_numbered</span></button>
     <button class="tb-btn" data-cmd="outdent" title="Decrease indent"><span class="material-symbols-outlined">format_indent_decrease</span></button>
     <button class="tb-btn" data-cmd="indent" title="Increase indent"><span class="material-symbols-outlined">format_indent_increase</span></button>
     <button class="tb-btn" data-cmd="clear" title="Clear formatting"><span class="material-symbols-outlined">format_clear</span></button>
@@ -190,7 +190,7 @@
       <button class="tabs-foot-btn" id="expandAll"><span class="material-symbols-outlined">unfold_more</span> Expand all</button>
       <button class="tabs-foot-btn" id="collapseAll"><span class="material-symbols-outlined">unfold_less</span> Collapse all</button>
     </div>
-    <div class="tabs-hint">Tip: hover a tab for <b>+</b> subtab · <b>⋮</b> for rename, duplicate, delete · drag to reorder</div>
+    <div class="tabs-hint">Tip: use <b>+</b> for a sibling · <b>⋮</b> for subtabs and more · drag to reorder</div>
   </aside>
 
   <!-- Editor -->
@@ -235,6 +235,12 @@
   <button class="status-btn" id="statusOutline" title="Outline"><span class="material-symbols-outlined">list</span> Outline</button>
 </footer>
 
+<!-- Image controls live outside the editable content and are never saved in the document. -->
+<div id="imageControls" class="image-controls hidden" role="group" aria-label="Selected image controls">
+  <button type="button" id="imageDelete" class="image-delete" aria-label="Delete selected image" title="Delete image"><span class="material-symbols-outlined">delete</span></button>
+  <button type="button" id="imageResize" class="image-resize" aria-label="Resize image; use left and right arrow keys" title="Drag to resize; use arrow keys for fine adjustments"></button>
+</div>
+
 <!-- ══════════ CONTEXT MENU / MENUS / MODALS / TOASTS ══════════ -->
 <div class="context-menu hidden" id="contextMenu" role="menu"></div>
 <div class="menu-dropdown hidden" id="menuDropdown" role="menu"></div>
@@ -244,6 +250,6 @@
 <div class="toast-wrap" id="toastWrap"></div>
 <input type="file" id="importFile" accept=".json,application/json" hidden />
 
-<script type="module" src="js/app.js?v=8"></script>
+<script type="module" src="js/app.js?v=9"></script>
 </body>
 </html>
