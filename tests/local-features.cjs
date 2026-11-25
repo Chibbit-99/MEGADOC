@@ -33,7 +33,7 @@ const { chromium } = require('playwright-core');
     assert.equal(await p.evaluate(() => { const n=getSelection().anchorNode; return (n.nodeType===1 ? n : n.parentElement).closest('h1,h2,h3,h4,h5,h6')?.textContent; }), 'Second');
     await p.keyboard.press('Control+Alt+2');
     assert.equal(await editor.locator('h2').count(), 1);
-    await editor.evaluate(el => { const r=document.createRange(); r.selectNodeContents(el.querySelector('p')); r.collapse(false); const s=getSelection();s.removeAllRanges();s.addRange(r); el.focus(); });
+    await editor.evaluate(el => { el.focus(); const r=document.createRange(); r.selectNodeContents(el.querySelector('p')); r.collapse(false); const s=getSelection();s.removeAllRanges();s.addRange(r); document.dispatchEvent(new Event('selectionchange')); });
     await p.keyboard.press('Control+Shift+e');
     assert.equal(await editor.locator('p').evaluate(el=>getComputedStyle(el).textAlign), 'center');
     await p.keyboard.press('Control+Shift+7'); assert.equal(await editor.locator('ol').count(), 1);
