@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MegaDoc export</title>
+  <style>
+    * { box-sizing: border-box; } body { max-width: 780px; margin: 2rem auto; padding: 0 1rem; font: 16px/1.5 system-ui, sans-serif; color: #202124; }
+    label { display: block; font-weight: 600; margin-top: 1rem; } input, textarea, select, button { font: inherit; } input, textarea, select { width: 100%; padding: .55rem; border: 1px solid #777; border-radius: 4px; }
+    textarea { min-height: 14rem; resize: vertical; } button { padding: .6rem .9rem; margin: 1rem .4rem 0 0; cursor: pointer; } button:disabled { cursor: wait; }
+    .note { color: #555; } #status { padding: .7rem; background: #eef3fb; overflow-wrap: anywhere; } #confirm { border: 1px solid #b35a00; padding: 1rem; margin-top: 1rem; } a { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <h1>Export to Google Docs</h1>
+  <p>Paste a single MegaDoc tab as plain text, or provide a structured export using the documented JSON format. This standalone prototype does not connect to MegaDoc automatically.</p>
+  <p class="note">Content is sent to Google Apps Script and the Google Docs API when you export. Use only a deployment you trust. Existing document overwrites are permanent changes; make a backup first.</p>
+  <label for="mode">Content format</label>
+  <select id="mode"><option value="text">Plain text</option><option value="json">Structured JSON</option></select>
+  <label for="title">New document title</label><input id="title" maxlength="120" value="MegaDoc export">
+  <label for="content">Tab content</label><textarea id="content" spellcheck="true"></textarea>
+  <button id="create">Create new Google Doc</button>
+  <h2>Replace an existing Google Doc</h2>
+  <p class="note">Only simple, single-tab documents without comments, suggestions, lists or special objects are eligible. The existing text and formatting will be replaced; document metadata may remain.</p>
+  <label for="document">Google Doc URL or ID</label><input id="document" autocomplete="off">
+  <button id="inspect">Inspect document for overwrite</button>
+  <section id="confirm" hidden>
+    <strong>Overwrite confirmation</strong>
+    <p id="target"></p><p>Type the exact current document title below, then confirm. This replaces the existing text.</p>
+    <label for="confirmation">Current document title</label><input id="confirmation" autocomplete="off">
+    <button id="overwrite">Replace document text</button><button id="cancel">Cancel</button>
+  </section>
+  <p id="status" role="status" aria-live="polite">Ready.</p>
+  <script>
+    (() => {
+      'use strict';
+      const $ = id => document.getElementById(id);
+      let ticket = null, pending = null, busy = false;
+      const status = text => { $('status').textContent = text; };
+      function clearConfirmation() { ticket = pending = null; $('confirm').hidden = true; $('confirmation').value = ''; }
+      function setBusy(value) { busy = value; for (const id of ['create','inspect','overwrite','cancel','mode','title','content','document','confirmation']) $(id).disabled = value; }
+      function payload() {
+        if ($('mode').value === 'json') return JSON.parse($('content').value);
+        const text = $('content').value.replace(/\r\n?/g, '\n');
+        return {version:1, title:$('title').value, blocks:text.split('\n').map(line => ({kind:'NORMAL_TEXT',runs:line ? [{text:line}] : []}))};
+      }
+      function failure(error) { setBusy(false); clearConfirmation(); status(error && error.message ? error.message : 'The request failed. Check the document before retrying.'); }
+      function result(response) {
+        setBusy(false); clearConfirmation(); $('status').textContent = response.ok ? 'Export complete. ' : response.message + ' ';
+        if (response.url && /^https:\/\/docs\.google\.com\/document\/d\/[A-Za-z0-9_-]+\/edit$/.test(response.url)) {
+          const link=document.createElement('a'); link.href=response.url; link.target='_blank'; link.rel='noopener noreferrer'; link.textContent='Open Google Doc'; $('status').appendChild(link);
+        }
+      }
+      for (const id of ['mode','title','content','document']) $(id).addEventListener('input', () => { if (!busy) clearConfirmation(); });
+      $('cancel').addEventListener('click', clearConfirmation);
+      $('create').addEventListener('click', () => {
+        let data; try { data=payload(); } catch (_) { status('Invalid structured JSON.'); return; }
+        clearConfirmation(); setBusy(true); status('Creating document…');
+        google.script.run.withSuccessHandler(result).withFailureHandler(failure).createDocument(data);
+      });
+      $('inspect').addEventListener('click', () => {
+        let data; try { data=payload(); } catch (_) { status('Invalid structured JSON.'); return; }
+        clearConfirmation(); setBusy(true); status('Inspecting document…');
+        google.script.run.withSuccessHandler(info => {
+          setBusy(false); ticket=info.ticket; pending=data;
+          $('target').textContent='Document: ' + info.title + ' (ID: ' + info.documentId + ')';
+          $('confirm').hidden=false; status('Review the target and confirm the overwrite.');
+        }).withFailureHandler(failure).prepareOverwrite($('document').value,data);
+      });
+      $('overwrite').addEventListener('click', () => {
+        if (!ticket) return;
+        setBusy(true); status('Replacing document text…');
+        google.script.run.withSuccessHandler(result).withFailureHandler(failure).overwriteDocument(ticket,$('confirmation').value,pending);
+      });
+    })();
+  </script>
+</body>
+</html>

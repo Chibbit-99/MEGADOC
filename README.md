@@ -114,3 +114,7 @@ Word import uses a locally bundled [Mammoth](https://github.com/mwilliamson/mamm
 Paginated preview uses the locally bundled [Paged.js](https://github.com/pagedjs/pagedjs). Direct image-based PDF download uses [html2canvas](https://github.com/niklasvh/html2canvas) and [jsPDF](https://github.com/parallax/jsPDF). Word export uses [docx](https://github.com/dolanmiu/docx); OpenDocument conversion uses [odf-kit](https://github.com/GitHubNewbie0/odf-kit). Their licenses and bundled dependency notices are in the corresponding `vendor/` folders.
 
 Spelling suggestions use locally bundled [nspell](https://github.com/wooorm/nspell) and English dictionaries; build instructions and licenses are in `vendor/spelling/`.
+
+### Google Docs export prototype
+
+A separate, standalone Google Apps Script project is available in [`google-apps-script/`](google-apps-script/README.md). It requires manual deployment and is not yet connected to the MegaDoc editor; see its setup and safety limitations before use.
