@@ -259,7 +259,7 @@ function duplicateTab(id) {
   const clone = (sid, parentId) => {
     const s = getTab(sid);
     const nid = uid();
-    state.tabs[nid] = { id: nid, title: parentId ? s.title : s.title + ' copy', parentId, children: [], content: s.content, updatedAt: Date.now(), history: [], comments: [], ...(typeof s.tabEmoji === 'string' ? { tabEmoji: s.tabEmoji } : {}) };
+    state.tabs[nid] = { id: nid, title: parentId ? s.title : s.title + ' copy', parentId, children: [], content: s.content, updatedAt: Date.now(), history: [], comments: [], ...(typeof s.tabEmoji === 'string' ? { tabEmoji: s.tabEmoji } : {}), ...(Object.hasOwn(s, 'pageView') ? {pageView: structuredClone(s.pageView)} : {}) };
     state.tabs[nid].children = s.children.map(c => clone(c, nid));
     return nid;
   };
@@ -404,6 +404,7 @@ function loadTabContent() {
   pendingClearRange = null; clearMarker = null;
   clearImageSelection();
   const t = getTab(state.activeTabId);
+  applyTabView();
   if (!t) {
     page.contentEditable = 'false';
     page.innerHTML = `<div class="empty-state">
@@ -450,15 +451,31 @@ page.addEventListener('input', e => {
   if (!programmaticEdit && !e.isComposing && (e.inputType === 'insertText' || e.inputType === 'insertFromComposition') && e.data?.endsWith(' ')) queueMicrotask(maybeApplyMarkdownAfterInput);
 });
 page.addEventListener('compositionend', () => { setTimeout(maybeApplyMarkdownAfterInput, 0); });
-page.addEventListener('paste', e => {
-  // paste as plain text to keep the doc clean, unless it contains HTML from this doc
-  const html = e.clipboardData.getData('text/html');
-  if (!html) return; // plain text paste is fine
-  e.preventDefault();
-  const text = e.clipboardData.getData('text/plain');
+// Browser copy/cut supplies both HTML and plain text. Sanitize rich paste before
+// inserting it as one native edit; text-only and paste-without-formatting use
+// the browser's normal path, including its own selection and undo behavior.
+function insertClipboardContent(html, text) {
+  if (!getTab(state.activeTabId) || mode === 'viewing') return false;
+  let content = '', command = 'insertText';
+  if (html) {
+    if (html.length > 10 * 1024 * 1024) { toast('Clipboard content exceeds 10 MB', 'error'); return false; }
+    try { content = sanitizeImportedHTML(html, true); command = 'insertHTML'; }
+    catch { toast('Rich paste is unavailable; use paste without formatting', 'error'); return false; }
+  }
+  if (!content && text) { content = text; command = 'insertText'; }
+  if (!content) { toast('There is no supported clipboard content to paste', 'info'); return false; }
   prepareClearTyping();
   programmaticEdit = true;
-  try { document.execCommand('insertText', false, text); } finally { programmaticEdit = false; }
+  let inserted;
+  try { inserted = document.execCommand(command, false, content); } finally { programmaticEdit = false; }
+  if (!inserted) toast('Could not paste here; place the caret in editable text', 'error');
+  return inserted;
+}
+page.addEventListener('paste', e => {
+  const html = e.clipboardData?.getData('text/html');
+  if (!html) return;
+  e.preventDefault();
+  insertClipboardContent(html, e.clipboardData.getData('text/plain'));
 });
 
 /* Markdown shortcuts are deliberately local to the current plain-text run.
@@ -1012,6 +1029,7 @@ function setZoom(z) {
   const scale = z / 100;
   const wrap = $('#pageWrap');
   wrap.style.transform = `scale(${scale})`;
+  wrap.style.setProperty('--view-scale', scale);
   wrap.style.marginBottom = `${(scale - 1) * page.offsetHeight}px`;
   $$('#zoomMenu button').forEach(b => b.classList.toggle('active', +b.dataset.zoom === z));
   buildRuler();
@@ -1349,9 +1367,28 @@ function clipboardCommand(command) {
   else if (command === 'cut') { saveCurrentContent(); updateWordCount(); save(); }
 }
 async function pasteAction() {
-  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'error'); return; }
-  try { const text = await navigator.clipboard.readText(); exec('insertText', text); }
-  catch { toast('Clipboard access unavailable. Use Ctrl+V or your browser paste shortcut.', 'content_paste'); }
+  const tab = getTab(state.activeTabId);
+  if (!tab || mode === 'viewing') { toast('Open an editable tab first', 'error'); return; }
+  focusPage();
+  const selection = getSelection();
+  if (!selection.rangeCount || !page.contains(selection.anchorNode) || !page.contains(selection.focusNode)) { toast('Place the caret in the document first', 'info'); return; }
+  const id = state.activeTabId, range = selection.getRangeAt(0).cloneRange(), original = page.innerHTML;
+  try {
+    let html = '', text = '';
+    if (navigator.clipboard?.read) {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        if (!html && item.types.includes('text/html')) html = await (await item.getType('text/html')).text();
+        if (!text && item.types.includes('text/plain')) text = await (await item.getType('text/plain')).text();
+        if (html || text) break;
+      }
+    } else if (navigator.clipboard?.readText) text = await navigator.clipboard.readText();
+    else throw new Error('Clipboard access unavailable');
+    const current = getSelection();
+    if (state.activeTabId !== id || getTab(id) !== tab || mode === 'viewing' || page.innerHTML !== original || !page.contains(range.commonAncestorContainer) || !current.rangeCount || current.getRangeAt(0).compareBoundaryPoints(Range.START_TO_START, range) !== 0 || current.getRangeAt(0).compareBoundaryPoints(Range.END_TO_END, range) !== 0) { toast('Document or selection changed; paste again', 'info'); return; }
+    page.focus(); current.removeAllRanges(); current.addRange(range);
+    insertClipboardContent(html, text);
+  } catch { toast('Clipboard access unavailable. Use Ctrl+V or your browser paste shortcut.', 'content_paste'); }
 }
 /* ─────────────────────────── Menus ─────────────────────────── */
 function closeMenus() {
@@ -1403,6 +1440,7 @@ const MENUS = [
   ]},
   { label: 'View', items: [
     { icon: 'view_sidebar', label: 'Toggle tabs panel', fn: () => togglePanel() },
+    { icon: 'description', label: 'Page view / pageless…', fn: tabViewModal },
     { icon: 'picture_as_pdf', label: 'Paginated preview', fn: showPaginationPreview },
     { icon: 'zoom_in', label: 'Zoom in', shortcut: 'Ctrl++', fn: () => setZoom(Math.min(200, state.zoom + 25)) },
     { icon: 'zoom_out', label: 'Zoom out', shortcut: 'Ctrl+-', fn: () => setZoom(Math.max(50, state.zoom - 25)) },
@@ -1416,7 +1454,7 @@ const MENUS = [
     { icon: 'footprint', label: 'Footnote…', fn: () => footnoteModal() },
     { icon: 'link', label: 'Link to tab, bookmark or heading…', fn: internalLinkModal },
     { icon: 'horizontal_rule', label: 'Horizontal line', fn: () => exec('insertHorizontalRule') },
-    { icon: 'page_break', label: 'Page break', fn: insertPageBreak },
+    { icon: 'page-break-svg', label: 'Page break', fn: insertPageBreak },
     { icon: 'table', label: 'Table', fn: insertTable },
     { icon: 'merge', label: 'Merge table cells…', fn: () => tableCellAction('merge') },
     { icon: 'call_split', label: 'Split merged table cell', fn: () => tableCellAction('split') },
@@ -1424,7 +1462,7 @@ const MENUS = [
     { icon: 'toc', label: 'Insert table of contents', fn: () => tocCommand('insert') },
     { icon: 'update', label: 'Update table of contents', fn: () => tocCommand('update') },
     { icon: 'delete', label: 'Remove table of contents', fn: () => tocCommand('remove') },
-    { icon: 'emoji', label: 'Emoji & special characters…', fn: emojiPicker },
+    { icon: 'emoji-svg', label: 'Emoji & special characters…', fn: emojiPicker },
     { icon: 'code', label: 'Code block', fn: () => setStyle('code') },
     { icon: 'note', label: 'Callout box', fn: () => exec('insertHTML', '<div class="callout">Callout text — edit me.</div><p><br></p>') },
   ]},
@@ -1485,12 +1523,18 @@ function buildMenubar() {
   });
 }
 
+// Use drawn icons for symbols not present in the bundled icon font subset.
+function menuIcon(icon) {
+  if (icon === 'page-break-svg') return '<svg class="menu-svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9V3h12v6M6 15v6h12v-6M3 12h3m3 0h2m2 0h2m3 0h3"/></svg>';
+  if (icon === 'emoji-svg') return '<svg class="menu-svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 14.5c1.1 1.5 2.4 2.2 4 2.2s2.9-.7 4-2.2M9 9.5h.01M15 9.5h.01" stroke-width="2"/></svg>';
+  return `<span class="material-symbols-outlined" aria-hidden="true">${icon}</span>`;
+}
 function openMenu(i, anchor) {
   const menu = MENUS[i];
   const dd = $('#menuDropdown');
   dd.innerHTML = menu.items.map(it => it.sep
     ? '<div class="mi-sep"></div>'
-    : `<button class="mi ${it.danger ? 'danger' : ''}" data-i="${menu.items.indexOf(it)}"><span class="material-symbols-outlined">${it.icon}</span>${it.label}${it.shortcut ? `<span class="shortcut">${it.shortcut}</span>` : ''}</button>`
+    : `<button class="mi ${it.danger ? 'danger' : ''}" data-i="${menu.items.indexOf(it)}">${menuIcon(it.icon)}${it.label}${it.shortcut ? `<span class="shortcut">${it.shortcut}</span>` : ''}</button>`
   ).join('');
   const rect = anchor.getBoundingClientRect();
   dd.style.left = rect.left + 'px';
@@ -1782,6 +1826,7 @@ page.addEventListener('keydown', e => {
 
 function insertPageBreak() {
   if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
+  if (getTab(state.activeTabId)?.pageView === 'pageless') { toast('Switch to page view to insert a page break', 'info'); return; }
   focusPage(); const sel = getSelection();
   if (!sel.rangeCount || !sel.isCollapsed || !page.contains(sel.anchorNode)) { toast('Place the caret where the break should go', 'info'); return; }
   const node = sel.anchorNode.nodeType === Node.ELEMENT_NODE ? sel.anchorNode : sel.anchorNode.parentElement;
@@ -1939,22 +1984,23 @@ function localImportDialog() {
   $('#mCancel').addEventListener('click', closeModal);
   $('#mOk').addEventListener('click', () => { closeModal(); $('#localContentFile').click(); });
 }
-function sanitizeImportedHTML(source) {
+function sanitizeImportedHTML(source, clipboard = false) {
   if (!window.DOMPurify) throw new Error('HTML sanitizer is unavailable');
   // Keep basic rich text, not embedded executable or interactive documents.
   const safe = DOMPurify.sanitize(source, {
-    ALLOWED_TAGS:['p','div','br','b','strong','i','em','u','s','strike','span','h1','h2','h3','h4','h5','h6','a','ul','ol','li','blockquote','pre','code','table','thead','tbody','tfoot','tr','td','th','img','hr','sup','sub'],
-    ALLOWED_ATTR:['href','src','style','alt','title','width','height','colspan','rowspan','start','value','reversed'],
+    ALLOWED_TAGS:['p','div','br','b','strong','i','em','u','s','strike','span','h1','h2','h3','h4','h5','h6','a','ul','ol','li','blockquote','pre','code','table','thead','tbody','tfoot','tr','td','th','img','hr','sup','sub', ...(clipboard ? ['font','mark','small','big'] : [])],
+    ALLOWED_ATTR:['href','src','style','alt','title','width','height','colspan','rowspan','start','value','reversed', ...(clipboard ? ['face','color','size','dir','lang'] : [])],
     ALLOW_DATA_ATTR:false, ALLOW_ARIA_ATTR:false
   });
   const doc = new DOMParser().parseFromString(safe, 'text/html');
-  const allowedStyles = new Set(['color','background-color','font-family','font-size','font-weight','font-style','text-decoration','text-align','line-height','letter-spacing','text-indent','margin-left','margin-right','margin-top','margin-bottom','padding','padding-left','padding-right','border','border-color','border-width','border-style','width','height','max-width','vertical-align','list-style-type','white-space']);
+  const allowedStyles = new Set(['color','background-color','font-family','font-size','font-weight','font-style','text-decoration','text-align','line-height','letter-spacing','text-indent','margin-left','margin-right','margin-top','margin-bottom','padding','padding-left','padding-right','border','border-color','border-width','border-style','width','height','max-width','vertical-align','list-style-type','white-space', ...(clipboard ? ['background','margin','padding-top','padding-bottom','border-top','border-bottom','border-left','border-right','text-decoration-line','text-decoration-style','text-decoration-color','text-transform','word-spacing'] : [])]);
   for (const el of doc.body.querySelectorAll('*')) {
     if (el.hasAttribute('style')) {
       const original = el.style, keep = [];
-      for (let i = 0; i < original.length; i++) { const key = original[i], value = original.getPropertyValue(key); if (allowedStyles.has(key) && !/url\s*\(|expression\s*\(|var\s*\(|@|\\/i.test(value)) keep.push(`${key}: ${value}`); }
+      for (let i = 0; i < original.length; i++) { const key = original[i], value = original.getPropertyValue(key); if (allowedStyles.has(key) && !/url\s*\(|expression\s*\(|var\s*\(|image-set\s*\(|@|\\/i.test(value) && (key !== 'background' || CSS.supports('color', value))) keep.push(`${key}: ${value}`); }
       if (keep.length) el.setAttribute('style', keep.join('; ')); else el.removeAttribute('style');
     }
+    if (el.hasAttribute('dir') && !/^(ltr|rtl|auto)$/i.test(el.getAttribute('dir'))) el.removeAttribute('dir');
     if (el.hasAttribute('href') && !/^(https?:|mailto:|#)/i.test(el.getAttribute('href').trim())) el.removeAttribute('href');
     if (el.hasAttribute('src') && !/^(https?:|data:image\/(?:png|jpeg|gif|webp);base64,)/i.test(el.getAttribute('src').trim())) el.removeAttribute('src');
     if (el.tagName === 'A' && el.hasAttribute('href') && !el.getAttribute('href').startsWith('#')) { el.setAttribute('target','_blank'); el.setAttribute('rel','noopener noreferrer'); }
@@ -2226,7 +2272,7 @@ function commandPalette() {
   const input = $('#cmdInput'), list = $('#cmdList');
   const draw = q => {
     const filtered = cmds.filter(c => c.label.toLowerCase().includes(q.toLowerCase())).slice(0, 30);
-    list.innerHTML = filtered.map((c, i) => `<button class="cmd-item ${i === 0 ? 'sel' : ''}" data-i="${cmds.indexOf(c)}"><span class="material-symbols-outlined">${c.icon}</span>${esc(c.label)}${c.shortcut ? `<span class="shortcut">${c.shortcut}</span>` : ''}</button>`).join('') || '<p style="padding:12px;color:var(--ink-3)">No commands found.</p>';
+    list.innerHTML = filtered.map((c, i) => `<button class="cmd-item ${i === 0 ? 'sel' : ''}" data-i="${cmds.indexOf(c)}">${menuIcon(c.icon)}${esc(c.label)}${c.shortcut ? `<span class="shortcut">${c.shortcut}</span>` : ''}</button>`).join('') || '<p style="padding:12px;color:var(--ink-3)">No commands found.</p>';
     list.querySelectorAll('.cmd-item').forEach(b => b.addEventListener('click', () => { closeModal(); cmds[+b.dataset.i].fn(); }));
   };
   draw('');
@@ -2673,6 +2719,29 @@ function showProfile() {
   $('#mDone').addEventListener('click', closeModal);
 }
 
+// Page view belongs to each tab and changes presentation only, not stored HTML.
+function applyTabView() {
+  document.body.classList.toggle('pageless-view', getTab(state.activeTabId)?.pageView === 'pageless');
+  buildRuler();
+  const wrap = $('#pageWrap');
+  wrap.style.marginBottom = `${((state.zoom || 100) / 100 - 1) * page.offsetHeight}px`;
+}
+function tabViewModal() {
+  const tab = getTab(state.activeTabId);
+  if (!tab) { toast('Create a tab first', 'info'); return; }
+  const id = state.activeTabId;
+  openModal('Page view for this tab', `<p>Choose how to edit this tab. Pageless fills the available width and hides page boundaries and the page-margin ruler.</p><fieldset class="view-choices"><legend>Editing layout</legend><label><input type="radio" name="tabPageView" value="pages"> Page view</label><label><input type="radio" name="tabPageView" value="pageless"> Pageless</label></fieldset><p>Existing page breaks are hidden, not deleted. Print preview still uses saved page settings, breaks, headers and footers; file export support varies.</p>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Apply</button>`);
+  $(`input[name="tabPageView"][value="${tab.pageView === 'pageless' ? 'pageless' : 'pages'}"]`).checked = true;
+  $('#mCancel').addEventListener('click', closeModal);
+  $('#mOk').addEventListener('click', () => {
+    if (state.activeTabId !== id || getTab(id) !== tab) { closeModal(); toast('Select the tab again', 'info'); return; }
+    const value = $('input[name="tabPageView"]:checked')?.value;
+    if (!['pages', 'pageless'].includes(value)) return;
+    tab.pageView = value; applyTabView(); save(); closeModal();
+    toast(value === 'pageless' ? 'Pageless view for this tab' : 'Page view for this tab', 'check_circle');
+  });
+}
+
 /* Page setup changes document presentation, not editable HTML. Unknown fields
    on existing saves are left intact; older saves continue using default sizing. */
 const PAPER_SIZES = { letter: [816, 1056, 'letter'], a4: [793.7, 1122.5, 'A4'], legal: [816, 1344, 'legal'] };
@@ -2800,6 +2869,7 @@ function pageGeometry() {
 }
 function buildRuler() {
   updatePrintPageSetup();
+  if (document.body.classList.contains('pageless-view')) { page.style.paddingLeft = ''; page.style.paddingRight = ''; if (selectedImage) updateImageControls(); return; }
   const factor = marginDisplayScale();
   page.style.paddingLeft = (marginValue('left') * factor) + 'px';
   page.style.paddingRight = (marginValue('right') * factor) + 'px';

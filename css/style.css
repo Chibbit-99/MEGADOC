@@ -588,3 +588,42 @@ body.viewing .page a[data-megadoc-footnote]{pointer-events:auto;cursor:pointer}
 .pagination-toolbar strong{color:var(--ink)}.pagination-toolbar #paginationStatus{color:var(--ink-2);font-size:13px;flex:1;min-width:150px}
 .pagination-preview iframe{width:100%;height:100%;flex:1;border:0;background:#e8eaed}
 @media print{.pagination-preview{display:none!important}}
+
+/* Compact, font-independent menu glyphs and readable subtab counts. */
+.menu-svg-icon{width:18px;height:18px;flex:none;color:var(--ink-2)}
+:root[data-ui-theme="dark"] .tab-badge{background:#465064;color:#f5f7ff}
+:root[data-ui-theme="dark"] .tab-row.active .tab-badge{background:#626d86;color:#fff}
+
+/* Pageless is a per-tab editing view; printing continues to use page settings. */
+.view-choices{border:0;display:flex;gap:18px;flex-wrap:wrap;margin:14px 0;color:var(--ink)}
+.view-choices legend{font-weight:600;margin-bottom:8px}
+.view-choices label{display:flex;align-items:center;gap:7px;cursor:pointer}
+.view-choices input{accent-color:var(--accent-solid)}
+@media screen{
+  body.pageless-view .ruler{display:none}
+  body.pageless-view .page-scroll{padding:0 0 80px;background:#fff}
+  body.pageless-view .scroll-fade{display:none}
+  body.pageless-view .page-wrap{width:calc(100% / var(--view-scale, 1));max-width:none;margin-left:0;margin-right:0;transform-origin:top left}
+  body.pageless-view .page{min-height:80vh;padding:32px clamp(24px,5vw,64px) 96px;border:0;box-shadow:none}
+  body.pageless-view .page:focus{box-shadow:none}
+  body.pageless-view .page [data-megadoc-page-break]{display:none}
+  :root[data-ui-theme="dark"] body.pageless-view .page-scroll{background:#242731}
+  body.pageless-view .page.dark-page{border:0}
+}
+@supports (zoom: 1){
+  @media screen{
+    body.pageless-view .page-wrap{width:100%;zoom:var(--view-scale, 1);transform:none!important;margin-bottom:0!important}
+  }
+}
+@media screen{
+  body.pageless-view .page-scroll:has(.page.dark-page){background:#202124}
+  :root[data-ui-theme="dark"] body.pageless-view .page-scroll:has(.page.dark-page){background:#242731}
+}
+/* Reflow even explicitly unwrapped imported text in the pageless editor,
+   while retaining its whitespace/newlines and leaving saved markup untouched. */
+@media screen{
+  body.pageless-view .page,body.pageless-view .page *{overflow-wrap:anywhere!important;text-wrap:wrap!important}
+}
+@supports not (text-wrap:wrap){
+  @media screen{body.pageless-view .page,body.pageless-view .page *{white-space:pre-wrap!important}}
+}
