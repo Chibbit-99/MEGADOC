@@ -217,6 +217,7 @@ function selectTab(id, preserveTree = false, keepPanelOpen = false) {
   editorRange = null; pendingFontSize = null;
   loadTabContent();
   syncFormatButtons();
+  if ($('#findbar').classList.contains('open')) runFind();
   if (preserveTree) {
     $$('#tabsTree .tab-row').forEach(row => row.classList.toggle('active', row.dataset.id === id));
     renderCrumbs();
@@ -379,6 +380,7 @@ function openTabMenu(id, anchor) {
 /* ─────────────────────────── Editor ─────────────────────────── */
 const page = $('#page');
 let selectedImage = null;
+let activeImageResize = null;
 let mode = 'editing';
 let programmaticEdit = false;
 let pendingClearRange = null;
@@ -386,6 +388,8 @@ let clearMarker = null;
 let placingClearMarker = false;
 
 function saveCurrentContent() {
+  // Never serialize a transient resize preview as a completed edit.
+  if (activeImageResize) cancelImageResize();
   const t = getTab(state.activeTabId);
   if (t && t.content !== page.innerHTML) {
     t.history ||= [];
@@ -441,6 +445,7 @@ page.addEventListener('input', e => {
     pendingFontSize = null;
   }
   saveCurrentContent(); updateWordCount(); save(); syncFormatButtons();
+  if ($('#findbar').classList.contains('open')) refreshFindCount();
   if (selectedImage) updateImageControls();
   if (!programmaticEdit && !e.isComposing && (e.inputType === 'insertText' || e.inputType === 'insertFromComposition') && e.data?.endsWith(' ')) queueMicrotask(maybeApplyMarkdownAfterInput);
 });
@@ -611,7 +616,7 @@ document.addEventListener('selectionchange', () => {
 function syncFormatButtons() {
   const sel = getSelection();
   const inPage = getTab(state.activeTabId) && mode !== 'viewing' && sel.rangeCount && page.contains(sel.anchorNode) && page.contains(sel.focusNode);
-  for (const [name, command] of [['bold','bold'], ['italic','italic'], ['underline','underline'], ['strike','strikeThrough'], ['bullets','insertUnorderedList'], ['numbering','insertOrderedList']]) {
+  for (const [name, command] of [['bold','bold'], ['italic','italic'], ['underline','underline'], ['strike','strikeThrough'], ['superscript','superscript'], ['subscript','subscript'], ['bullets','insertUnorderedList'], ['numbering','insertOrderedList']]) {
     const button = $(`#toolbar [data-cmd="${name}"]`);
     const active = !!inPage && !pendingClearRange && document.queryCommandState(command);
     button.classList.toggle('active', active);
@@ -642,11 +647,19 @@ function focusPage() {
 function exec(cmd, val = null) {
   pendingClearRange = null;
   if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
+  const alignImage = /^justify(Left|Center|Right|Full)$/.test(cmd) && selectedImage && page.contains(selectedImage);
+  const imageIndex = alignImage ? $$('#page img').indexOf(selectedImage) : -1;
   focusPage();
+  if (alignImage) {
+    const range = document.createRange(); range.selectNode(selectedImage);
+    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+  }
   programmaticEdit = true;
   try { document.execCommand(cmd, false, val); } finally { programmaticEdit = false; }
   const sel = getSelection();
   if (sel.rangeCount && page.contains(sel.anchorNode)) editorRange = sel.getRangeAt(0).cloneRange();
+  if (alignImage) { selectedImage = $$('#page img')[imageIndex] || null; updateImageControls(); }
+  else if (selectedImage && !page.contains(selectedImage)) clearImageSelection();
   saveCurrentContent(); updateWordCount(); save(); syncFormatButtons();
 }
 // removeFormat on a collapsed caret does not stop inheriting ancestor styles in
@@ -700,6 +713,239 @@ function clearFormatting() {
   toast('Formatting cleared', 'format_clear');
 }
 
+// Clone the selected range into a detached copy, edit its text nodes, then
+// replace the editable page in one native undo step. This preserves surrounding
+// formatting, tables, embedded images and data attributes across block ranges.
+function cloneRangeInPage(range, copy) {
+  const path = node => { const out = []; while (node !== page && node?.parentNode) { out.unshift([...node.parentNode.childNodes].indexOf(node)); node = node.parentNode; } return node === page ? out : null; };
+  const locate = steps => steps?.reduce((node, i) => node?.childNodes[i], copy);
+  const start = locate(path(range.startContainer)), end = locate(path(range.endContainer));
+  if (!start || !end) return null;
+  const mapped = document.createRange(); mapped.setStart(start, range.startOffset); mapped.setEnd(end, range.endOffset); return mapped;
+}
+function commitClonedPage(clone) {
+  // Chromium can leave a ghost table when replacing all content ending in a table,
+  // and attempting to undo that failed insertion can corrupt the undo history.
+  let tail = page.lastChild;
+  while (tail) { while (tail && tail.nodeType === Node.TEXT_NODE && !tail.data.trim()) tail = tail.previousSibling; if (!tail) break; if (tail.nodeType === Node.ELEMENT_NODE && tail.matches('table')) { toast('Add a paragraph after the final table before using this command', 'info'); return false; } if (tail.lastChild) tail = tail.lastChild; else break; }
+  if (page.querySelector('script,style,iframe,object,embed,[contenteditable="false"]')) { toast('This page contains protected or embedded content that cannot be safely transformed', 'error'); return false; }
+  const expected = clone.innerHTML, original = page.innerHTML;
+  clearImageSelection();
+  const all = document.createRange(); all.selectNodeContents(page); page.focus();
+  const selection = getSelection(); selection.removeAllRanges(); selection.addRange(all);
+  programmaticEdit = true; let ok;
+  try { ok = document.execCommand('insertHTML', false, expected); } finally { programmaticEdit = false; }
+  if (!ok || page.innerHTML !== expected) {
+    if (ok) document.execCommand('undo');
+    if (page.innerHTML !== original) page.innerHTML = original;
+    saveCurrentContent(); save(); toast('Change could not be applied safely; the page was restored', 'error'); return false;
+  }
+  editorRange = selection.rangeCount && page.contains(selection.anchorNode) ? selection.getRangeAt(0).cloneRange() : null;
+  saveCurrentContent(); updateWordCount(); save(); syncFormatButtons(); return true;
+}
+function textTransformModal() {
+  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
+  focusPage();
+  const sel = getSelection();
+  if (!sel.rangeCount || sel.isCollapsed || !page.contains(sel.anchorNode) || !page.contains(sel.focusNode)) { toast('Select text to change first', 'info'); return; }
+  const range = sel.getRangeAt(0).cloneRange(), tabId = state.activeTabId;
+  openModal('Capitalization & letter spacing', `<div class="field"><label for="textCase">Capitalization</label><select id="textCase"><option value="unchanged">Leave unchanged</option><option value="upper">UPPERCASE</option><option value="lower">lowercase</option><option value="title">Title Case</option></select></div><div class="field"><label for="letterSpacing">Letter spacing in pixels (leave blank to keep)</label><input id="letterSpacing" type="number" min="-5" max="20" step="0.1" placeholder="Unchanged"></div><p>Applies to selected text in the current tab; images and other non-text content are preserved.</p>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Apply</button>`);
+  $('#mCancel').addEventListener('click', closeModal);
+  $('#mOk').addEventListener('click', () => {
+    if (state.activeTabId !== tabId || !page.contains(range.commonAncestorContainer) || mode === 'viewing') { closeModal(); toast('Select the text again', 'error'); return; }
+    const choice = $('#textCase').value, spacingValue = $('#letterSpacing').value, spacing = Number(spacingValue);
+    if (spacingValue !== '' && (!Number.isFinite(spacing) || spacing < -5 || spacing > 20)) { toast('Choose letter spacing from -5 to 20 pixels', 'error'); return; }
+    if (choice === 'unchanged' && spacingValue === '') { closeModal(); return; }
+    if (page.querySelector('script,style,iframe,object,embed,[contenteditable="false"]')) { toast('This page contains protected or embedded content that cannot be safely transformed', 'error'); return; }
+    const clone = page.cloneNode(true), selected = cloneRangeInPage(range, clone);
+    if (!selected) { closeModal(); toast('Select the text again', 'error'); return; }
+    const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT), pieces = []; let node;
+    while ((node = walker.nextNode())) {
+      if (!selected.intersectsNode(node) || node.parentElement?.closest('script,style,button,[contenteditable="false"]')) continue;
+      const start = node === selected.startContainer ? selected.startOffset : 0;
+      const end = node === selected.endContainer ? selected.endOffset : node.length;
+      if (end > start) pieces.push({node, start, end});
+    }
+    if (!pieces.length) { closeModal(); toast('Select editable text to change', 'info'); return; }
+    let inWord = false, previousBlock = null;
+    for (const piece of pieces) {
+      const block = piece.node.parentElement?.closest('p,h1,h2,h3,h4,h5,h6,blockquote,pre,li,div,td,th') || clone;
+      if (block !== previousBlock) inWord = false;
+      previousBlock = block;
+      let value = piece.node.data.slice(piece.start, piece.end);
+      if (choice === 'upper') value = value.toLocaleUpperCase();
+      else if (choice === 'lower') value = value.toLocaleLowerCase();
+      else if (choice === 'title') {
+        value = Array.from(value, char => {
+          const word = /[\p{L}\p{N}]/u.test(char);
+          const result = word ? (inWord ? char.toLocaleLowerCase() : char.toLocaleUpperCase()) : char;
+          inWord = word; return result;
+        }).join('');
+      }
+      piece.value = value;
+    }
+    // Process from the end to keep the captured node offsets valid.
+    for (const piece of pieces.reverse()) {
+      const {node, start, end, value} = piece;
+      if (spacingValue === '') node.replaceData(start, end - start, value);
+      else {
+        if (end < node.length) node.splitText(end);
+        const middle = start ? node.splitText(start) : node;
+        middle.data = value;
+        const span = document.createElement('span'); span.style.letterSpacing = `${spacing}px`;
+        middle.parentNode.insertBefore(span, middle); span.appendChild(middle);
+      }
+    }
+    closeModal(); commitClonedPage(clone);
+  });
+}
+
+// Document-wide defaults are kept separately from individual inline formatting.
+// Older versions retain the optional field even though they cannot display it.
+const STYLE_FONTS = ['Arial','Roboto','Georgia','Times New Roman','Courier New','Verdana','Comic Sans MS'];
+const STYLE_DEFAULTS = {p:11,h1:26,h2:20,h3:15,h4:13,h5:11,h6:10};
+let paragraphStyleUndo = [], paragraphStyleRedo = [];
+function normalizedParagraphStyle(value, key) {
+  value = value && typeof value === 'object' ? value : {};
+  const size = Number(value.size), weight = Number(value.weight);
+  return {font:STYLE_FONTS.includes(value.font) ? value.font : 'Arial', size:Number.isFinite(size) && size >= 6 && size <= 96 ? size : STYLE_DEFAULTS[key], color:/^#[0-9a-f]{6}$/i.test(value.color || '') ? value.color : '#000000', weight:weight === 400 || weight === 700 ? weight : key === 'p' ? 400 : 700};
+}
+function applyParagraphStyles() {
+  const styles = state.paragraphStyles;
+  if (!styles || typeof styles !== 'object') { $('#paragraphStyleRules').textContent = ''; return; }
+  const rules = [];
+  for (const key of Object.keys(STYLE_DEFAULTS)) {
+    if (!styles[key] || typeof styles[key] !== 'object' || !['font','size','weight','color'].some(prop => Object.hasOwn(styles[key],prop))) continue;
+    const v = normalizedParagraphStyle(styles[key], key);
+    const selector = key === 'p' ? '.page' : `.page ${key}`;
+    rules.push(`${selector}{font-family:"${v.font}";font-size:${v.size}pt;font-weight:${v.weight};color:${v.color}}`);
+  }
+  $('#paragraphStyleRules').textContent = rules.join('\n');
+}
+function paragraphStylesModal() {
+  openModal('Document paragraph styles', `<p>Set defaults for all tabs and new content. Inline formatting still takes priority. These are document settings; use Undo / Redo here rather than text undo.</p><div class="field"><label for="paragraphStyleName">Style</label><select id="paragraphStyleName"><option value="p">Normal text</option>${[1,2,3,4,5,6].map(n => `<option value="h${n}">Heading ${n}</option>`).join('')}</select></div><div class="field"><label for="paragraphStyleFont">Font</label><select id="paragraphStyleFont">${STYLE_FONTS.map(font => `<option value="${esc(font)}">${esc(font)}</option>`).join('')}</select></div><div class="table-fields"><div class="field"><label for="paragraphStyleSize">Size (pt)</label><input id="paragraphStyleSize" type="number" min="6" max="96" step="0.5"></div><div class="field"><label for="paragraphStyleColor">Color</label><input id="paragraphStyleColor" type="color"></div></div><div class="field"><label for="paragraphStyleWeight">Weight</label><select id="paragraphStyleWeight"><option value="400">Regular</option><option value="700">Bold</option></select></div><p>Dark-page appearance may override the text color for readability.</p>`, `<button class="btn text" id="styleUndo">Undo</button><button class="btn text" id="styleRedo">Redo</button><button class="btn text" id="styleReset">Reset style</button><button class="btn text" id="mCancel">Close</button><button class="btn primary" id="mOk">Apply</button>`);
+  const kind = $('#paragraphStyleName');
+  const refresh = () => {
+    const v = normalizedParagraphStyle(state.paragraphStyles?.[kind.value], kind.value);
+    $('#paragraphStyleFont').value = v.font; $('#paragraphStyleSize').value = v.size; $('#paragraphStyleColor').value = v.color; $('#paragraphStyleWeight').value = String(v.weight);
+    $('#styleUndo').disabled = !paragraphStyleUndo.length; $('#styleRedo').disabled = !paragraphStyleRedo.length;
+  };
+  const snapshot = () => structuredClone(state.paragraphStyles ?? null);
+  const change = next => { paragraphStyleUndo.push(snapshot()); if (paragraphStyleUndo.length > 50) paragraphStyleUndo.shift(); paragraphStyleRedo = []; state.paragraphStyles = next; applyParagraphStyles(); save(); refresh(); };
+  kind.addEventListener('change', refresh); $('#mCancel').addEventListener('click', closeModal);
+  $('#mOk').addEventListener('click', () => {
+    const key = kind.value, size = Number($('#paragraphStyleSize').value), color = $('#paragraphStyleColor').value, font = $('#paragraphStyleFont').value, weight = Number($('#paragraphStyleWeight').value);
+    if (!Object.hasOwn(STYLE_DEFAULTS,key) || !STYLE_FONTS.includes(font) || !Number.isFinite(size) || size < 6 || size > 96 || !/^#[0-9a-f]{6}$/i.test(color) || ![400,700].includes(weight)) { toast('Choose a valid font and size from 6 to 96 points', 'error'); return; }
+    const all = state.paragraphStyles && typeof state.paragraphStyles === 'object' ? {...state.paragraphStyles} : {};
+    all[key] = {...(all[key] && typeof all[key] === 'object' ? all[key] : {}), font,size,color,weight}; change(all); toast('Paragraph style updated', 'format_paint');
+  });
+  $('#styleReset').addEventListener('click', () => {
+    const all = state.paragraphStyles && typeof state.paragraphStyles === 'object' ? {...state.paragraphStyles} : {};
+    if (all[kind.value] && typeof all[kind.value] === 'object') { const retained = {...all[kind.value]}; for (const prop of ['font','size','weight','color']) delete retained[prop]; if (Object.keys(retained).length) all[kind.value] = retained; else delete all[kind.value]; }
+    change(all); toast('Paragraph style reset', 'restart_alt');
+  });
+  $('#styleUndo').addEventListener('click', () => { if (!paragraphStyleUndo.length) return; paragraphStyleRedo.push(snapshot()); state.paragraphStyles = paragraphStyleUndo.pop(); applyParagraphStyles(); save(); refresh(); });
+  $('#styleRedo').addEventListener('click', () => { if (!paragraphStyleRedo.length) return; paragraphStyleUndo.push(snapshot()); state.paragraphStyles = paragraphStyleRedo.pop(); applyParagraphStyles(); save(); refresh(); });
+  refresh();
+}
+
+function paragraphOptionsModal() {
+  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
+  focusPage(); const selection = getSelection();
+  if (!selection.rangeCount || !page.contains(selection.anchorNode) || !page.contains(selection.focusNode)) return;
+  const range = selection.getRangeAt(0).cloneRange(), tabId = state.activeTabId;
+  openModal('Paragraph spacing & indents', `<p>Applies to paragraphs touched by the selection in the current tab. Leave a field blank to keep its current value.</p><div class="table-fields"><div class="field"><label for="paragraphBefore">Space before (px)</label><input id="paragraphBefore" type="number" min="0" max="200" placeholder="Unchanged"></div><div class="field"><label for="paragraphAfter">Space after (px)</label><input id="paragraphAfter" type="number" min="0" max="200" placeholder="Unchanged"></div></div><div class="field"><label for="paragraphIndentMode">First-line indentation</label><select id="paragraphIndentMode"><option value="keep">Keep current indentation</option><option value="none">None</option><option value="first">First line</option><option value="hanging">Hanging</option></select></div><div class="field"><label for="paragraphIndent">Indent amount (px)</label><input id="paragraphIndent" type="number" min="0" max="200" value="24"></div>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Apply</button>`);
+  $('#mCancel').addEventListener('click', closeModal);
+  $('#mOk').addEventListener('click', () => {
+    if (state.activeTabId !== tabId || !page.contains(range.commonAncestorContainer) || mode === 'viewing') { closeModal(); toast('Select the paragraphs again', 'error'); return; }
+    const before = $('#paragraphBefore').value, after = $('#paragraphAfter').value, type = $('#paragraphIndentMode').value, amount = Number($('#paragraphIndent').value);
+    if ((before !== '' && (!Number.isFinite(Number(before)) || Number(before) < 0 || Number(before) > 200)) || (after !== '' && (!Number.isFinite(Number(after)) || Number(after) < 0 || Number(after) > 200)) || (type !== 'keep' && type !== 'none' && (!Number.isFinite(amount) || amount < 0 || amount > 200))) { toast('Choose sizes between 0 and 200 pixels', 'error'); return; }
+    if (before === '' && after === '' && type === 'keep') { closeModal(); return; }
+    const clone = page.cloneNode(true), selected = cloneRangeInPage(range, clone);
+    if (!selected) { closeModal(); toast('Select the paragraphs again', 'error'); return; }
+    const blockSelector = 'p,h1,h2,h3,h4,h5,h6,blockquote,pre,li,div,td,th';
+    const targets = new Set(), bare = new Set();
+    const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT); let node;
+    while ((node = walker.nextNode())) {
+      if (!selected.intersectsNode(node) || node.parentElement?.closest('script,style,button,[contenteditable="false"]')) continue;
+      if (!selected.collapsed && ((node === selected.startContainer && selected.startOffset === node.length) || (node === selected.endContainer && selected.endOffset === 0))) continue;
+      const block = node.parentElement?.closest(blockSelector);
+      if (!block || block === clone || !clone.contains(block)) bare.add(node); else targets.add(block);
+    }
+    // A collapsed caret in an empty paragraph has no text node.
+    if (selected.collapsed && !targets.size && !bare.size) {
+      const at = selected.startContainer.nodeType === Node.ELEMENT_NODE ? selected.startContainer : selected.startContainer.parentElement;
+      const block = at?.closest(blockSelector);
+      if (block && block !== clone && clone.contains(block)) targets.add(block);
+      else if (!clone.childNodes.length) { const p = document.createElement('p'); p.appendChild(document.createElement('br')); clone.appendChild(p); targets.add(p); }
+      else { const first = clone.firstChild; if (first) bare.add(first); }
+    }
+    // Wrap bare inline content on the page in a block, preserving its nodes.
+    for (const leaf of bare) {
+      let top = leaf; while (top.parentNode && top.parentNode !== clone) top = top.parentNode;
+      if (top.parentNode !== clone) continue;
+      const isBlock = n => n.nodeType === Node.ELEMENT_NODE && /^(P|DIV|H[1-6]|BLOCKQUOTE|PRE|UL|OL|TABLE|HR|SECTION|FIGURE)$/.test(n.tagName);
+      let first = top; while (first.previousSibling && !isBlock(first.previousSibling)) first = first.previousSibling;
+      let last = top; while (last.nextSibling && !isBlock(last.nextSibling)) last = last.nextSibling;
+      const end = last.nextSibling, wrapper = document.createElement('div'); clone.insertBefore(wrapper, first);
+      while (first && first !== end) { const next = first.nextSibling; wrapper.appendChild(first); first = next; }
+      targets.add(wrapper);
+    }
+    if (!targets.size) { closeModal(); toast('No editable paragraphs in the selection', 'info'); return; }
+    if ([...targets].some(block => /^(TD|TH)$/.test(block.tagName) && block.querySelector('table,ul,ol,p,div,blockquote,pre,h1,h2,h3,h4,h5,h6'))) { closeModal(); toast('Select a paragraph inside the cell instead', 'info'); return; }
+    targets.forEach(originalBlock => {
+      let block = originalBlock;
+      if (/^(TD|TH)$/.test(block.tagName)) { const wrapper = document.createElement('div'); while (block.firstChild) wrapper.appendChild(block.firstChild); block.appendChild(wrapper); block = wrapper; }
+      if (before !== '') block.style.marginTop = `${Number(before)}px`;
+      if (after !== '') block.style.marginBottom = `${Number(after)}px`;
+      if (type === 'none') { block.style.textIndent = '0px'; block.style.removeProperty('margin-left'); }
+      else if (type === 'first') { block.style.textIndent = `${amount}px`; block.style.removeProperty('margin-left'); }
+      else if (type === 'hanging') { block.style.textIndent = `${-amount}px`; block.style.marginLeft = `${amount}px`; }
+    });
+    closeModal(); commitClonedPage(clone);
+  });
+}
+
+function listOptionsModal() {
+  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
+  focusPage(); const selection = getSelection();
+  if (!selection.rangeCount || !page.contains(selection.anchorNode)) return;
+  const node = selection.anchorNode.nodeType === Node.ELEMENT_NODE ? selection.anchorNode : selection.anchorNode.parentElement;
+  const list = node?.closest('ol,ul');
+  if (!list || !page.contains(list)) { toast('Place the caret in a list first', 'info'); return; }
+  const range = selection.getRangeAt(0).cloneRange(), tabId = state.activeTabId, ordered = list.tagName === 'OL';
+  const options = ordered ? [['decimal','1, 2, 3'],['lower-alpha','a, b, c'],['upper-alpha','A, B, C'],['lower-roman','i, ii, iii'],['upper-roman','I, II, III']] : [['disc','Disc'],['circle','Circle'],['square','Square']];
+  openModal('List options', `<div class="field"><label for="listMarker">Marker style</label><select id="listMarker"><option value="">Keep current style</option>${options.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}</select></div>${ordered ? `<div class="field"><label for="listNumberMode">Numbering</label><select id="listNumberMode"><option value="keep">Keep current numbering</option><option value="start">Restart at a number</option><option value="continue">Continue previous list</option></select></div><div class="field"><label for="listStart">Start number</label><input type="number" id="listStart" min="-1000000" max="1000000" value="1"></div>` : ''}<p>Applies to the current list in this tab; nested lists retain their own styles.</p>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Apply</button>`);
+  $('#mCancel').addEventListener('click', closeModal);
+  $('#mOk').addEventListener('click', () => {
+    if (state.activeTabId !== tabId || !page.contains(list) || !page.contains(range.commonAncestorContainer) || mode === 'viewing') { closeModal(); toast('Select the list again', 'error'); return; }
+    const clone = page.cloneNode(true), mapped = cloneRangeInPage(range, clone);
+    const n = mapped?.startContainer.nodeType === Node.ELEMENT_NODE ? mapped.startContainer : mapped?.startContainer.parentElement;
+    const target = n?.closest('ol,ul'), marker = $('#listMarker').value;
+    if (!target || !clone.contains(target)) { closeModal(); toast('Select the list again', 'error'); return; }
+    if (marker && !options.some(([value]) => value === marker)) return;
+    if (marker) target.style.listStyleType = marker;
+    if (ordered) {
+      const action = $('#listNumberMode').value;
+      if (action === 'start') {
+        const value = Number($('#listStart').value);
+        if (!Number.isInteger(value) || value < -1000000 || value > 1000000) { toast('Choose a valid start number', 'error'); return; }
+        target.setAttribute('start', String(value));
+      } else if (action === 'continue') {
+        let previous = target.previousElementSibling;
+        while (previous && previous.tagName !== 'OL') previous = previous.previousElementSibling;
+        if (!previous) { toast('No earlier numbered list in this section', 'info'); return; }
+        const items = [...previous.children].filter(child => child.tagName === 'LI');
+        const step = previous.hasAttribute('reversed') ? -1 : 1;
+        let next = previous.hasAttribute('start') ? Number(previous.getAttribute('start')) : step < 0 ? items.length : 1;
+        for (const item of items) { if (item.hasAttribute('value') && Number.isInteger(Number(item.getAttribute('value')))) next = Number(item.getAttribute('value')); next += step; }
+        target.setAttribute('start', String(next));
+      }
+    }
+    closeModal(); commitClonedPage(clone);
+  });
+}
+
 function selectionBlock() {
   const sel = getSelection();
   if (!sel.rangeCount) return null;
@@ -711,7 +957,7 @@ function selectionBlock() {
 const toolbarActions = {
   undo: () => exec('undo'),
   redo: () => exec('redo'),
-  print: () => { saveCurrentContent(); window.print(); },
+  print: () => showPaginationPreview(),
   spellcheck: () => {
     const on = page.spellcheck;
     page.spellcheck = !on;
@@ -722,6 +968,8 @@ const toolbarActions = {
   italic: () => exec('italic'),
   underline: () => exec('underline'),
   strike: () => exec('strikeThrough'),
+  superscript: () => exec('superscript'),
+  subscript: () => exec('subscript'),
   link: linkModal,
   image: imageModal,
   checklist: () => exec('insertHTML', '<ul class="checklist"><li><input type="checkbox" contenteditable="false"> Task</li></ul><p><br></p>'),
@@ -764,7 +1012,7 @@ function setZoom(z) {
   const scale = z / 100;
   const wrap = $('#pageWrap');
   wrap.style.transform = `scale(${scale})`;
-  wrap.style.marginBottom = `${(scale - 1) * 1056}px`;
+  wrap.style.marginBottom = `${(scale - 1) * page.offsetHeight}px`;
   $$('#zoomMenu button').forEach(b => b.classList.toggle('active', +b.dataset.zoom === z));
   buildRuler();
   save();
@@ -824,6 +1072,7 @@ function buildPalettes() {
 /* Image controls are separate from the editable document, so merely selecting
    an image never modifies stored HTML. Resizes are stored in the image style. */
 function clearImageSelection() {
+  cancelImageResize();
   selectedImage = null;
   $('#imageControls').classList.add('hidden');
 }
@@ -838,21 +1087,169 @@ function updateImageControls() {
   controls.classList.remove('hidden');
   Object.assign(controls.style, { left: rect.left + 'px', top: rect.top + 'px', width: rect.width + 'px', height: rect.height + 'px' });
   const top = Math.max(-18, view.top - rect.top), right = Math.max(-18, rect.right - view.right);
-  const bottom = Math.max(-18, rect.bottom - view.bottom), left = Math.max(-18, view.left - rect.left);
+  const bottom = Math.max(-18, rect.bottom - view.bottom), left = Math.max(-Math.max(18, 122 - rect.width), view.left - rect.left);
   controls.style.clipPath = `inset(${top}px ${right}px ${bottom}px ${left}px)`;
 }
-function resizeSelectedImage(width, height) {
-  if (!selectedImage || !page.contains(selectedImage) || mode === 'viewing') return;
-  const container = selectedImage.closest('td,th,p,div,blockquote') || page;
+// Preview changes only the DOM. At commit, restore the original, then replace
+// the image (or its inline wrapper) through the browser's native undo stack.
+function restoreImageStyle(image, style) {
+  if (style === null) image.removeAttribute('style'); else image.setAttribute('style', style);
+}
+function cancelImageResize() {
+  if (!activeImageResize) return;
+  const { image, originalStyle } = activeImageResize;
+  activeImageResize = null;
+  restoreImageStyle(image, originalStyle);
+  if (selectedImage === image && page.contains(image)) updateImageControls();
+}
+function beginImageResize() {
+  if (activeImageResize || !selectedImage || !page.contains(selectedImage) || mode === 'viewing') return false;
+  const bounds = selectedImage.getBoundingClientRect(), scale = pageGeometry()?.scale || 1, computed = getComputedStyle(selectedImage);
+  if (!bounds.width || !bounds.height) return false;
+  // CSS rotation changes the bounding rectangle but not the image's layout size.
+  const width = parseFloat(computed.width) || bounds.width / scale, height = parseFloat(computed.height) || bounds.height / scale;
+  activeImageResize = { image: selectedImage, originalStyle: selectedImage.getAttribute('style'), width, height, changed: false };
+  return true;
+}
+function previewImageResize(width) {
+  const edit = activeImageResize;
+  if (!edit || selectedImage !== edit.image || !page.contains(edit.image)) return;
+  const container = edit.image.closest('td,th,p,div,blockquote') || page;
   const computed = getComputedStyle(container);
   const available = container.clientWidth - parseFloat(computed.paddingLeft) - parseFloat(computed.paddingRight);
   const maxWidth = Math.max(1, available);
   const newWidth = Math.min(maxWidth, Math.max(Math.min(24, maxWidth), width));
-  if (!Number.isFinite(newWidth) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
-  selectedImage.style.width = `${Math.round(newWidth * 100) / 100}px`;
-  selectedImage.style.height = 'auto';
-  selectedImage.style.aspectRatio = `${Math.round(width * 100) / 100} / ${Math.round(height * 100) / 100}`;
+  if (!Number.isFinite(newWidth)) return;
+  edit.changed = Math.abs(newWidth - edit.width) >= 0.01;
+  if (!edit.changed) restoreImageStyle(edit.image, edit.originalStyle);
+  else {
+    edit.image.style.width = `${Math.round(newWidth * 100) / 100}px`;
+    edit.image.style.height = 'auto';
+    edit.image.style.aspectRatio = `${Math.round(edit.width * 100) / 100} / ${Math.round(edit.height * 100) / 100}`;
+  }
+  updateImageControls();
+}
+function commitImageResize() {
+  const edit = activeImageResize;
+  if (!edit) return;
+  activeImageResize = null;
+  if (!edit.changed || !page.contains(edit.image) || selectedImage !== edit.image || mode === 'viewing') {
+    restoreImageStyle(edit.image, edit.originalStyle); updateImageControls(); return;
+  }
+  const imageIndex = $$('#page img').indexOf(edit.image);
+  // Replacing an image alone can drop links or inline formatting in Chromium.
+  // Include its outer inline wrapper while leaving paragraphs/tables intact.
+  let target = edit.image;
+  while (target.parentElement && target.parentElement !== page &&
+      !/^(P|DIV|H[1-6]|BLOCKQUOTE|PRE|LI|TD|TH|FIGURE|FIGCAPTION)$/.test(target.parentElement.tagName)) {
+    target = target.parentElement;
+  }
+  const replacement = target.outerHTML;
+  restoreImageStyle(edit.image, edit.originalStyle);
+  const range = document.createRange(); range.selectNode(target);
+  page.focus(); const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+  programmaticEdit = true;
+  let inserted;
+  try { inserted = document.execCommand('insertHTML', false, replacement); } finally { programmaticEdit = false; }
+  if (!inserted) { clearImageSelection(); toast('Could not resize this image', 'error'); return; }
+  selectedImage = $$('#page img')[imageIndex] || null;
+  editorRange = selection.rangeCount && page.contains(selection.anchorNode) ? selection.getRangeAt(0).cloneRange() : null;
   saveCurrentContent(); updateWordCount(); save(); updateImageControls();
+}
+// Replacing an image's inline wrapper keeps links and attributes and uses the
+// browser's undo history. Metadata changes never mutate stored HTML in place.
+function updateImageMarkup(image, tabId, change) {
+  if (state.activeTabId !== tabId || !page.contains(image) || mode === 'viewing') { toast('Select the image again', 'error'); return false; }
+  let target = image;
+  while (target.parentElement && target.parentElement !== page && !/^(P|DIV|H[1-6]|BLOCKQUOTE|PRE|LI|TD|TH|FIGURE|FIGCAPTION)$/.test(target.parentElement.tagName)) target = target.parentElement;
+  const index = $$('#page img').indexOf(image), nested = target === image ? 0 : [...target.querySelectorAll('img')].indexOf(image);
+  const copy = target.cloneNode(true), copiedImage = target === image ? copy : copy.querySelectorAll('img')[nested];
+  if (!copiedImage) return false;
+  change(copiedImage);
+  const range = document.createRange(); range.selectNode(target); page.focus();
+  const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+  programmaticEdit = true;
+  let inserted;
+  try { inserted = document.execCommand('insertHTML', false, copy.outerHTML); } finally { programmaticEdit = false; }
+  if (!inserted) { toast('Could not update the image', 'error'); return false; }
+  selectedImage = $$('#page img')[index] || null;
+  editorRange = sel.rangeCount && page.contains(sel.anchorNode) ? sel.getRangeAt(0).cloneRange() : null;
+  saveCurrentContent(); save(); updateImageControls();
+  return true;
+}
+function editImageAdjustments() {
+  const image = selectedImage, tabId = state.activeTabId;
+  if (!image || !page.contains(image) || mode === 'viewing') return;
+  let crop = [0,0,0,0];
+  try { const data = JSON.parse(image.dataset.megadocCrop || 'null'); if (Array.isArray(data?.insets) && data.insets.length === 4 && data.insets.every(Number.isFinite)) crop = data.insets; } catch {}
+  openModal('Image adjustments', `<div class="field"><label for="imageRotation">Rotation</label><select id="imageRotation"><option value="keep">Keep current rotation</option><option value="0">0°</option><option value="90">90° clockwise</option><option value="180">180°</option><option value="270">270° clockwise</option></select></div><p>Rotation does not rearrange surrounding text; rotated images may overlap nearby content.</p><div class="field"><label><input type="checkbox" id="imageCropApply"> Set crop from original image</label></div><div class="table-fields">${['Top','Right','Bottom','Left'].map((side,i)=>`<div class="field"><label for="crop${side}">${side} (%)</label><input id="crop${side}" type="number" min="0" max="99" step="0.1" value="${crop[i]}"></div>`).join('')}</div><p><label><input type="checkbox" id="imageCropReset"> Remove crop and restore previous proportions</label></p><p>Crop is non-destructive and requires browser support for CSS object-view-box. The original source is retained.</p><div class="field"><label><input type="checkbox" id="imageBorderApply"> Set border</label></div><div class="table-fields"><div class="field"><label for="imageBorderWidth">Border width (px; 0 removes)</label><input id="imageBorderWidth" type="number" min="0" max="20" step="1" value="1"></div><div class="field"><label for="imageBorderColor">Border color</label><input id="imageBorderColor" type="color" value="#000000"></div></div>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Apply</button>`);
+  $('#mCancel').addEventListener('click', closeModal);
+  $('#mOk').addEventListener('click', () => {
+    if (state.activeTabId !== tabId || !page.contains(image) || mode === 'viewing') { closeModal(); toast('Select the image again', 'error'); return; }
+    const rotate = $('#imageRotation').value, doCrop = $('#imageCropApply').checked, reset = $('#imageCropReset').checked, border = $('#imageBorderApply').checked;
+    const insets = ['Top','Right','Bottom','Left'].map(side => Number($(`#crop${side}`).value)), borderWidth = Number($('#imageBorderWidth').value), borderColor = $('#imageBorderColor').value;
+    if (!['keep','0','90','180','270'].includes(rotate) || (border && (!Number.isInteger(borderWidth) || borderWidth < 0 || borderWidth > 20 || !/^#[0-9a-f]{6}$/i.test(borderColor))) || (doCrop && (insets.some(n => !Number.isFinite(n) || n < 0 || n >= 100) || insets[0] + insets[2] >= 100 || insets[1] + insets[3] >= 100)) || (doCrop && reset)) { toast('Choose valid crop and border values', 'error'); return; }
+    if (rotate !== 'keep' && !CSS.supports('rotate','90deg')) { toast('This browser does not support image rotation', 'info'); return; }
+    if ((doCrop || reset) && !CSS.supports('object-view-box','inset(1%)')) { toast('This browser does not support non-destructive cropping', 'info'); return; }
+    if (doCrop && (!image.naturalWidth || !image.naturalHeight)) { toast('Wait for the image to load before cropping', 'info'); return; }
+    if (rotate === 'keep' && !doCrop && !reset && !border) { closeModal(); return; }
+    let previous = null; try { previous = JSON.parse(image.dataset.megadocCrop || 'null'); } catch {}
+    if (reset && (!previous || !previous.original || !Array.isArray(previous.insets))) { toast('This image does not have a MegaDoc crop to remove', 'info'); return; }
+    const ratio = doCrop ? `${image.naturalWidth * (100-insets[1]-insets[3])} / ${image.naturalHeight * (100-insets[0]-insets[2])}` : '';
+    const imageGeometry = getComputedStyle(image), currentWidth = parseFloat(imageGeometry.width), currentHeight = parseFloat(imageGeometry.height);
+    closeModal();
+    updateImageMarkup(image, tabId, copy => {
+      if (rotate !== 'keep') copy.style.rotate = `${rotate}deg`;
+      if (doCrop) {
+        const original = previous?.original || {height:copy.style.height, aspectRatio:copy.style.aspectRatio, objectViewBox:copy.style.getPropertyValue('object-view-box'), widthAtCrop:currentWidth, heightAtCrop:currentHeight};
+        copy.dataset.megadocCrop = JSON.stringify({insets,original});
+        copy.style.setProperty('object-view-box', `inset(${insets.map(n=>`${n}%`).join(' ')})`); copy.style.height = 'auto'; copy.style.aspectRatio = ratio;
+      } else if (reset) {
+        const original = previous.original;
+        copy.style.height = typeof original.height === 'string' ? original.height : '';
+        copy.style.aspectRatio = typeof original.aspectRatio === 'string' ? original.aspectRatio : '';
+        if (Number.isFinite(original.widthAtCrop) && Number.isFinite(original.heightAtCrop) && original.widthAtCrop > 0 && original.heightAtCrop > 0 && Math.abs(currentWidth - original.widthAtCrop) > .5) { copy.style.height = 'auto'; copy.style.aspectRatio = `${original.widthAtCrop} / ${original.heightAtCrop}`; }
+        if (typeof original.objectViewBox === 'string' && original.objectViewBox) copy.style.setProperty('object-view-box',original.objectViewBox); else copy.style.removeProperty('object-view-box');
+        delete copy.dataset.megadocCrop;
+      }
+      if (border) { copy.style.borderStyle = 'solid'; copy.style.borderWidth = `${borderWidth}px`; copy.style.borderColor = borderColor; }
+    });
+  });
+}
+function editImageAlt() {
+  const image = selectedImage, tabId = state.activeTabId;
+  if (!image || !page.contains(image) || mode === 'viewing') return;
+  openModal('Image alt text', `<div class="field"><label for="imageDescription">Description</label><textarea id="imageDescription" rows="3">${esc(image.getAttribute('alt') || '')}</textarea></div><div class="field"><label for="imageTitle">Title (optional)</label><input id="imageTitle" value="${esc(image.getAttribute('title') || '')}"></div><p>Describe what the image conveys. Leave the description empty for a decorative image.</p>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Apply</button>`);
+  $('#mCancel').addEventListener('click', closeModal);
+  $('#mOk').addEventListener('click', () => {
+    const alt = $('#imageDescription').value, title = $('#imageTitle').value;
+    closeModal();
+    updateImageMarkup(image, tabId, copy => { copy.setAttribute('alt', alt); if (title) copy.setAttribute('title', title); else copy.removeAttribute('title'); });
+  });
+}
+function editImageLayout() {
+  const image = selectedImage, tabId = state.activeTabId;
+  if (!image || !page.contains(image) || mode === 'viewing') return;
+  const style = image.style;
+  const layout = style.float === 'left' ? 'left' : style.float === 'right' ? 'right' : style.display === 'block' ? 'break' : 'inline';
+  const gap = Number.parseFloat(style.marginTop) || 0;
+  openModal('Image text layout', `<div class="field"><label for="imageLayout">Layout</label><select id="imageLayout"><option value="inline">In line with text</option><option value="left">Wrap text, image on left</option><option value="right">Wrap text, image on right</option><option value="break">Break text</option></select></div><div class="field"><label for="imageGap">Space around image (pixels)</label><input type="number" id="imageGap" min="0" max="100" step="1" value="${Math.max(0, Math.min(100, Math.round(gap)))}"></div><p>Wrapped images move with the surrounding text. Use paragraph alignment to position inline or break-text images.</p>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Apply</button>`);
+  $('#imageLayout').value = layout;
+  $('#mCancel').addEventListener('click', closeModal);
+  $('#mOk').addEventListener('click', () => {
+    const choice = $('#imageLayout').value, margin = Number($('#imageGap').value);
+    if (!Number.isFinite(margin) || margin < 0 || margin > 100) { toast('Choose a spacing from 0 to 100 pixels', 'error'); return; }
+    closeModal();
+    updateImageMarkup(image, tabId, copy => {
+      const css = copy.style;
+      css.display = choice === 'inline' ? 'inline' : 'block';
+      css.float = choice === 'left' || choice === 'right' ? choice : 'none';
+      css.clear = choice === 'break' ? 'both' : 'none';
+      css.marginTop = css.marginBottom = `${margin}px`;
+      if (choice === 'break') { css.removeProperty('margin-left'); css.removeProperty('margin-right'); }
+      else css.marginLeft = css.marginRight = `${margin}px`;
+    });
+  });
 }
 function deleteSelectedImage() {
   if (!selectedImage || !page.contains(selectedImage) || mode === 'viewing') return;
@@ -875,34 +1272,44 @@ function wireImageControls() {
   page.addEventListener('keydown', e => {
     if (!selectedImage) return;
     if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); e.stopPropagation(); deleteSelectedImage(); }
-    else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) clearImageSelection();
+    else if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key) || (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1)) clearImageSelection();
   });
   document.addEventListener('click', e => {
-    if (selectedImage && !page.contains(e.target) && !controls.contains(e.target)) clearImageSelection();
+    // Keep the image as the alignment target while using editor menus.
+    if (selectedImage && !page.contains(e.target) && !controls.contains(e.target) &&
+        !e.target.closest('#toolbar, #menubar, #menuDropdown')) clearImageSelection();
   });
   $('#imageDelete').addEventListener('click', deleteSelectedImage);
+  $('#imageAlt').addEventListener('click', editImageAlt);
+  $('#imageAdjust').addEventListener('click', editImageAdjustments);
+  $('#imageLayoutButton').addEventListener('click', editImageLayout);
   resize.addEventListener('pointerdown', e => {
-    if (!selectedImage) return;
+    if (!beginImageResize()) return;
     e.preventDefault(); e.stopPropagation();
-    const image = selectedImage, bounds = image.getBoundingClientRect();
-    const scale = pageGeometry()?.scale || 1;
-    const startWidth = bounds.width / scale, startHeight = bounds.height / scale, startX = e.clientX;
+    const edit = activeImageResize, scale = pageGeometry()?.scale || 1, startX = e.clientX;
     resize.setPointerCapture(e.pointerId);
-    const move = ev => {
-      if (selectedImage !== image) return;
-      const width = startWidth + (ev.clientX - startX) / scale;
-      resizeSelectedImage(width, startHeight * Math.max(0.001, width) / startWidth);
+    const move = ev => { if (activeImageResize === edit) previewImageResize(edit.width + (ev.clientX - startX) / scale); };
+    const finish = ev => {
+      resize.removeEventListener('pointermove', move); resize.removeEventListener('pointerup', finish); resize.removeEventListener('pointercancel', finish);
+      if (activeImageResize !== edit) return;
+      if (ev.type === 'pointercancel') cancelImageResize(); else commitImageResize();
     };
-    const up = () => { resize.removeEventListener('pointermove', move); resize.removeEventListener('pointerup', up); resize.removeEventListener('pointercancel', up); };
-    resize.addEventListener('pointermove', move); resize.addEventListener('pointerup', up); resize.addEventListener('pointercancel', up);
+    resize.addEventListener('pointermove', move); resize.addEventListener('pointerup', finish); resize.addEventListener('pointercancel', finish);
   });
   resize.addEventListener('keydown', e => {
-    if (!selectedImage || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+    if (!['ArrowLeft', 'ArrowRight'].includes(e.key) || !beginImageResize()) return;
     e.preventDefault();
-    const bounds = selectedImage.getBoundingClientRect(), scale = pageGeometry()?.scale || 1;
-    const width = bounds.width / scale, height = bounds.height / scale;
-    const next = Math.max(1, width + (e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 20 : 5));
-    resizeSelectedImage(next, height * next / width);
+    const edit = activeImageResize;
+    previewImageResize(edit.width + (e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 20 : 5));
+    commitImageResize();
+    if (selectedImage) resize.focus();
+  });
+  controls.addEventListener('keydown', e => {
+    const mod = e.ctrlKey || e.metaKey, key = e.key.toLowerCase();
+    if (mod && !e.altKey && (key === 'z' || key === 'y')) {
+      e.preventDefault(); e.stopPropagation();
+      exec(key === 'y' || e.shiftKey ? 'redo' : 'undo');
+    }
   });
 }
 
@@ -965,8 +1372,15 @@ const MENUS = [
     { sep: true },
     { icon: 'download', label: 'Export as JSON', fn: exportJSON },
     { icon: 'upload', label: 'Import JSON…', fn: () => $('#importFile').click() },
+    { icon: 'upload_file', label: 'Import text, HTML, DOCX or ODT as a new tab…', fn: localImportDialog },
+    { icon: 'text_snippet', label: 'Export current tab as text', fn: () => exportLocalContent('text') },
+    { icon: 'html', label: 'Export current tab as HTML', fn: () => exportLocalContent('html') },
+    { icon: 'description', label: 'Export current tab as DOCX…', fn: () => exportOfficeDialog('docx') },
+    { icon: 'description', label: 'Export current tab as ODT…', fn: () => exportOfficeDialog('odt') },
     { icon: 'restore', label: 'Restore previous local document…', fn: restoreLegacy },
     { sep: true },
+    { icon: 'description', label: 'Page setup…', fn: showPageSetup },
+    { icon: 'view_headline', label: 'Headers, footers & page numbers…', fn: printLayoutModal },
     { icon: 'print', label: 'Print', shortcut: 'Ctrl+P', fn: () => toolbarActions.print() },
     { icon: 'info', label: 'Document details', fn: showDetails },
     { sep: true },
@@ -989,6 +1403,7 @@ const MENUS = [
   ]},
   { label: 'View', items: [
     { icon: 'view_sidebar', label: 'Toggle tabs panel', fn: () => togglePanel() },
+    { icon: 'picture_as_pdf', label: 'Paginated preview', fn: showPaginationPreview },
     { icon: 'zoom_in', label: 'Zoom in', shortcut: 'Ctrl++', fn: () => setZoom(Math.min(200, state.zoom + 25)) },
     { icon: 'zoom_out', label: 'Zoom out', shortcut: 'Ctrl+-', fn: () => setZoom(Math.max(50, state.zoom - 25)) },
     { icon: 'fullscreen', label: 'Toggle full screen', fn: async () => { try { if (document.fullscreenElement) await document.exitFullscreen(); else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen(); else toast('Full screen is unavailable in this browser', 'info'); } catch { toast('Full screen is unavailable here', 'info'); } } },
@@ -997,9 +1412,19 @@ const MENUS = [
   { label: 'Insert', items: [
     { icon: 'image', label: 'Image (URL)…', fn: () => toolbarActions.image() },
     { icon: 'link', label: 'Link', shortcut: 'Ctrl+K', fn: () => toolbarActions.link() },
+    { icon: 'bookmark_add', label: 'Bookmark…', fn: () => bookmarkModal() },
+    { icon: 'footprint', label: 'Footnote…', fn: () => footnoteModal() },
+    { icon: 'link', label: 'Link to tab, bookmark or heading…', fn: internalLinkModal },
     { icon: 'horizontal_rule', label: 'Horizontal line', fn: () => exec('insertHorizontalRule') },
+    { icon: 'page_break', label: 'Page break', fn: insertPageBreak },
     { icon: 'table', label: 'Table', fn: insertTable },
-    { icon: 'emoji', label: 'Emoji…', fn: emojiPicker },
+    { icon: 'merge', label: 'Merge table cells…', fn: () => tableCellAction('merge') },
+    { icon: 'call_split', label: 'Split merged table cell', fn: () => tableCellAction('split') },
+    { icon: 'functions', label: 'Equation…', fn: () => equationModal() },
+    { icon: 'toc', label: 'Insert table of contents', fn: () => tocCommand('insert') },
+    { icon: 'update', label: 'Update table of contents', fn: () => tocCommand('update') },
+    { icon: 'delete', label: 'Remove table of contents', fn: () => tocCommand('remove') },
+    { icon: 'emoji', label: 'Emoji & special characters…', fn: emojiPicker },
     { icon: 'code', label: 'Code block', fn: () => setStyle('code') },
     { icon: 'note', label: 'Callout box', fn: () => exec('insertHTML', '<div class="callout">Callout text — edit me.</div><p><br></p>') },
   ]},
@@ -1008,7 +1433,12 @@ const MENUS = [
     { icon: 'format_italic', label: 'Italic', shortcut: 'Ctrl+I', fn: () => exec('italic') },
     { icon: 'format_underlined', label: 'Underline', shortcut: 'Ctrl+U', fn: () => exec('underline') },
     { icon: 'format_strikethrough', label: 'Strikethrough', fn: () => exec('strikeThrough') },
+    { icon: 'superscript', label: 'Superscript', shortcut: 'Ctrl+.', fn: () => exec('superscript') },
+    { icon: 'subscript', label: 'Subscript', shortcut: 'Ctrl+,', fn: () => exec('subscript') },
     { sep: true },
+    { icon: 'text_fields', label: 'Capitalization & letter spacing…', fn: textTransformModal },
+    { icon: 'format_line_spacing', label: 'Paragraph spacing & indents…', fn: paragraphOptionsModal },
+    { icon: 'format_paint', label: 'Document paragraph styles…', fn: paragraphStylesModal },
     { icon: 'format_clear', label: 'Clear formatting', fn: () => toolbarActions.clear() },
     { icon: 'format_align_left', label: 'Align left', fn: () => exec('justifyLeft') },
     { icon: 'format_align_center', label: 'Align center', fn: () => exec('justifyCenter') },
@@ -1017,6 +1447,7 @@ const MENUS = [
     { sep: true },
     { icon: 'format_list_bulleted', label: 'Bulleted list', fn: () => exec('insertUnorderedList') },
     { icon: 'format_list_numbered', label: 'Numbered list', fn: () => exec('insertOrderedList') },
+    { icon: 'format_list_numbered', label: 'List options…', fn: listOptionsModal },
   ]},
   { label: 'Tools', items: [
     { icon: 'fact_check', label: 'Word count', fn: showDetails },
@@ -1092,6 +1523,15 @@ function showEditorContext(e) {
     <button class="mi" data-editor-action="col-after"><span class="material-symbols-outlined">add</span> Insert column right</button>
     <button class="mi" data-editor-action="row-delete"><span class="material-symbols-outlined">remove</span> Delete row</button>
     <button class="mi" data-editor-action="col-delete"><span class="material-symbols-outlined">remove</span> Delete column</button>
+    <button class="mi" data-editor-action="table-style"><span class="material-symbols-outlined">tune</span> Table size &amp; cell style…</button>
+    <button class="mi" data-editor-action="cell-merge"><span class="material-symbols-outlined">merge</span> Merge cells…</button>
+    <button class="mi" data-editor-action="cell-split"><span class="material-symbols-outlined">call_split</span> Split merged cell</button>
+    <button class="mi" data-editor-action="row-up"><span class="material-symbols-outlined">arrow_upward</span> Move row up</button>
+    <button class="mi" data-editor-action="row-down"><span class="material-symbols-outlined">arrow_downward</span> Move row down</button>
+    <button class="mi" data-editor-action="col-left"><span class="material-symbols-outlined">arrow_back</span> Move column left</button>
+    <button class="mi" data-editor-action="col-right"><span class="material-symbols-outlined">arrow_forward</span> Move column right</button>
+    <button class="mi" data-editor-action="sort-ascending"><span class="material-symbols-outlined">sort_by_alpha</span> Sort rows A–Z by this column</button>
+    <button class="mi" data-editor-action="sort-descending"><span class="material-symbols-outlined">sort_by_alpha</span> Sort rows Z–A by this column</button>
     <button class="mi danger" data-editor-action="table-delete"><span class="material-symbols-outlined">delete</span> Delete table</button>
     <div class="mi-sep"></div>` : '') + `
     <div class="mi-label">Edit</div>
@@ -1107,7 +1547,10 @@ function showEditorContext(e) {
   menu.querySelectorAll('[data-editor-action]').forEach(button => button.addEventListener('click', () => {
     const action = button.dataset.editorAction;
     closeMenus();
-    if (['header-add','row-before','row-after','col-before','col-after','row-delete','col-delete','table-delete'].includes(action)) editTable(table, cell, action);
+    if (action === 'table-style') editTableStyle(table, cell);
+    else if (action === 'cell-merge') mergeCellsModal(table, cell);
+    else if (action === 'cell-split') splitMergedCell(table, cell);
+    else if (['header-add','row-before','row-after','col-before','col-after','row-delete','col-delete','row-up','row-down','col-left','col-right','sort-ascending','sort-descending','table-delete'].includes(action)) editTable(table, cell, action);
     else if (action === 'undo') exec('undo');
     else if (action === 'cut' || action === 'copy') clipboardCommand(action);
     else if (action === 'paste') pasteAction();
@@ -1115,6 +1558,146 @@ function showEditorContext(e) {
   }));
 }
 page.addEventListener('contextmenu', showEditorContext);
+
+// A logical grid maps row/column coordinates even when a MegaDoc cell spans
+// rows. Invalid, overlapping or uneven imported structures are never changed.
+function tableGrid(table) {
+  const rows = [...table.rows], grid = rows.map(() => []), origins = new Map();
+  for (let r = 0; r < rows.length; r++) {
+    let c = 0;
+    for (const cell of rows[r].cells) {
+      while (grid[r][c]) c++;
+      const h = cell.rowSpan, w = cell.colSpan;
+      if (!h || h > rows.length - r || w < 1 || w > 100 || h > 100) return null;
+      for (let y = r; y < r + h; y++) {
+        if (rows[y].parentElement !== rows[r].parentElement) return null;
+        for (let x = c; x < c + w; x++) { if (grid[y][x]) return null; grid[y][x] = cell; }
+      }
+      origins.set(cell, {row:r,col:c}); c += w;
+    }
+  }
+  const width = grid[0]?.length || 0;
+  if (!width || grid.some(row => row.length !== width || Array.from({length:width},(_,i)=>row[i]).some(cell=>!cell))) return null;
+  return {rows,grid,origins,width};
+}
+function replaceEditedTable(table, clone) {
+  const range = document.createRange(); range.selectNode(table); page.focus();
+  const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+  programmaticEdit = true; let ok; try { ok = document.execCommand('insertHTML', false, clone.outerHTML); } finally { programmaticEdit = false; }
+  if (!ok) { toast('Could not update this table', 'error'); return; }
+  editorRange = selection.rangeCount && page.contains(selection.anchorNode) ? selection.getRangeAt(0).cloneRange() : null;
+  saveCurrentContent(); updateWordCount(); save();
+}
+function tableCellAction(action) {
+  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
+  focusPage(); const node = getSelection().anchorNode;
+  const cell = (node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement)?.closest('td,th');
+  const table = cell?.closest('table');
+  if (!table || !page.contains(table)) { toast('Place the caret in a table cell first', 'info'); return; }
+  if (action === 'merge') mergeCellsModal(table, cell); else splitMergedCell(table, cell);
+}
+function mergeCellsModal(table, cell) {
+  if (!table || !cell || !page.contains(table) || mode === 'viewing') return;
+  const model = tableGrid(table), pos = model?.origins.get(cell), tabId = state.activeTabId;
+  if (!model || !pos || model.rows.some(row => [...row.cells].some(c => c.rowSpan !== 1 || c.colSpan !== 1)) || table.querySelector('table,[contenteditable="false"]')) { toast('Merging requires a regular table without protected or nested content', 'info'); return; }
+  const maxRows = model.rows.length - pos.row, maxCols = model.width - pos.col;
+  openModal('Merge cells', `<p>The selected cell is the top-left corner. Choose a rectangular area below and to the right; its contents are kept in order. Merging cannot cross table sections.</p><div class="table-fields"><div class="field"><label for="mergeRows">Rows</label><input id="mergeRows" type="number" min="1" max="${maxRows}" value="1"></div><div class="field"><label for="mergeCols">Columns</label><input id="mergeCols" type="number" min="1" max="${maxCols}" value="${Math.min(2,maxCols)}"></div></div>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Merge</button>`);
+  $('#mCancel').addEventListener('click', closeModal);
+  $('#mOk').addEventListener('click', () => {
+    const height = Number($('#mergeRows').value), width = Number($('#mergeCols').value);
+    if (!Number.isInteger(height) || !Number.isInteger(width) || height < 1 || width < 1 || height > maxRows || width > maxCols || height * width < 2) { toast('Choose at least two cells within the table', 'info'); return; }
+    if (state.activeTabId !== tabId || !page.contains(table) || !page.contains(cell) || mode === 'viewing') { closeModal(); toast('Select the table again', 'error'); return; }
+    const current = tableGrid(table);
+    if (!current || current.rows.length !== model.rows.length || current.width !== model.width || current.origins.get(cell)?.row !== pos.row || current.origins.get(cell)?.col !== pos.col || current.rows.some(row => [...row.cells].some(c => c.rowSpan !== 1 || c.colSpan !== 1)) || table.querySelector('table,[contenteditable="false"]')) { closeModal(); toast('Select the table again', 'error'); return; }
+    if (current.rows.slice(pos.row,pos.row + height).some(row => row.parentElement !== current.rows[pos.row].parentElement)) { toast('Cannot merge across table sections', 'info'); return; }
+    const clone = table.cloneNode(true), mapped = tableGrid(clone), merged = mapped.grid[pos.row][pos.col];
+    const originals = [];
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) originals.push({cell:mapped.grid[pos.row+y][pos.col+x], y, x});
+    const parts = originals.map(({cell:source,y,x}) => {
+      const wrapper = document.createElement('div');
+      wrapper.setAttribute('data-megadoc-merge-cell', JSON.stringify({y,x,tag:source.tagName.toLowerCase(),attrs:[...source.attributes].map(a=>[a.name,a.value])}));
+      while (source.firstChild) wrapper.appendChild(source.firstChild); return wrapper;
+    });
+    for (const {cell:source} of originals) if (source !== merged) source.remove();
+    merged.colSpan = width; merged.rowSpan = height; merged.setAttribute('data-megadoc-merged','1'); parts.forEach(part => merged.appendChild(part));
+    closeModal(); replaceEditedTable(table, clone);
+  });
+}
+function splitMergedCell(table, cell) {
+  if (!table || !cell || !page.contains(table) || mode === 'viewing') return;
+  const model = tableGrid(table), pos = model?.origins.get(cell), height = cell.rowSpan, width = cell.colSpan;
+  if (!model || !pos || cell.dataset.megadocMerged !== '1' || height * width < 2 || table.querySelector('table,[contenteditable="false"]')) { toast('Only safely preserved MegaDoc merged cells can be split', 'info'); return; }
+  const parts = [...cell.children];
+  let metadata;
+  try { metadata = parts.map(part => JSON.parse(part.getAttribute('data-megadoc-merge-cell'))); } catch { metadata = null; }
+  if (!metadata || parts.length !== height * width || cell.childNodes.length !== parts.length || metadata.some((m,i) => !m || m.y !== Math.floor(i / width) || m.x !== i % width || !['td','th'].includes(m.tag) || !Array.isArray(m.attrs) || m.attrs.some(a => !Array.isArray(a) || a.length !== 2 || typeof a[0] !== 'string' || typeof a[1] !== 'string'))) { toast('Cell contents changed in a way that cannot be split safely', 'info'); return; }
+  const clone = table.cloneNode(true), copy = tableGrid(clone), merged = copy.grid[pos.row][pos.col], copyParts = [...merged.children];
+  try {
+    for (let y = 0; y < height; y++) {
+      const row = copy.rows[pos.row+y];
+      const reference = [...row.cells].find(existing => existing !== merged && copy.origins.get(existing)?.col >= pos.col + width) || null;
+      for (let x = 0; x < width; x++) {
+        const n = y * width + x, meta = metadata[n], restored = document.createElement(meta.tag);
+        for (const [name,value] of meta.attrs) restored.setAttribute(name,value);
+        while (copyParts[n].firstChild) restored.appendChild(copyParts[n].firstChild);
+        row.insertBefore(restored, y === 0 ? merged : reference);
+      }
+    }
+    merged.remove();
+  } catch { toast('Cell attributes cannot be restored safely', 'error'); return; }
+  replaceEditedTable(table, clone);
+}
+
+function editTableStyle(table, cell) {
+  const tabId = state.activeTabId;
+  if (!table || !cell || !page.contains(table) || mode === 'viewing') return;
+  const rows = [...table.rows], rowIndex = rows.indexOf(cell.parentElement), colIndex = cell.cellIndex;
+  const cols = rows[0]?.cells.length || 0;
+  if (rowIndex < 0 || colIndex < 0 || rows.some(r => r.cells.length !== cols || [...r.cells].some(c => c.rowSpan !== 1 || c.colSpan !== 1))) { toast('Table styling currently requires an even grid without merged cells', 'info'); return; }
+  const colorHex = (color, fallback) => {
+    const m = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(color);
+    return m ? '#' + m.slice(1,4).map(x => Math.min(255, +x).toString(16).padStart(2,'0')).join('') : fallback;
+  };
+  const computed = getComputedStyle(cell), scale = pageGeometry()?.scale || 1;
+  const width = Math.round(cell.getBoundingClientRect().width / scale), height = Math.round(cell.parentElement.getBoundingClientRect().height / scale);
+  openModal('Table size & cell style', `<p>Sizes apply to the selected row or column; colors and borders apply to the selected cell.</p>
+    <div class="table-fields"><div class="field"><label for="tableColumnWidth">Column width (px)</label><input id="tableColumnWidth" type="number" min="16" max="2000" placeholder="${width}"></div><div class="field"><label for="tableRowHeight">Row height (px, minimum)</label><input id="tableRowHeight" type="number" min="1" max="2000" placeholder="${height}"></div></div>
+    <p><label><input id="distributeColumns" type="checkbox"> Distribute columns evenly</label><br><label><input id="distributeRows" type="checkbox"> Distribute rows evenly</label></p>
+    <div class="table-fields"><div class="field"><label><input id="useCellFill" type="checkbox"> Set cell fill</label><input id="cellFill" type="color" value="${colorHex(computed.backgroundColor, '#ffffff')}"></div><div class="field"><label><input id="useCellBorder" type="checkbox"> Set cell border</label><input id="cellBorder" type="color" value="${colorHex(computed.borderTopColor, '#bdc1c6')}"><label for="cellBorderWidth">Border width (px)</label><input id="cellBorderWidth" type="number" min="0" max="10" value="1"></div></div>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Apply</button>`);
+  $('#mCancel').addEventListener('click', closeModal);
+  $('#mOk').addEventListener('click', () => {
+    if (state.activeTabId !== tabId || !page.contains(table) || !page.contains(cell) || mode === 'viewing') { closeModal(); toast('Select the table again', 'error'); return; }
+    const widthInput = $('#tableColumnWidth').value, heightInput = $('#tableRowHeight').value;
+    const w = Number(widthInput), h = Number(heightInput), borderWidth = Number($('#cellBorderWidth').value);
+    const distributeCols = $('#distributeColumns').checked, distributeRows = $('#distributeRows').checked;
+    const fill = $('#useCellFill').checked, border = $('#useCellBorder').checked;
+    if ((widthInput && (!Number.isFinite(w) || w < 16 || w > 2000)) || (heightInput && (!Number.isFinite(h) || h < 1 || h > 2000)) || (border && (!Number.isFinite(borderWidth) || borderWidth < 0 || borderWidth > 10))) { toast('Enter valid sizes within the indicated ranges', 'error'); return; }
+    if ((widthInput || distributeCols) && table.querySelector(':scope > colgroup, :scope > col')) { toast('Column sizing with column-group styling is not supported', 'info'); return; }
+    if (!widthInput && !heightInput && !distributeCols && !distributeRows && !fill && !border) { closeModal(); return; }
+    const clone = table.cloneNode(true), clonedRows = [...clone.rows], clonedCell = clonedRows[rowIndex].cells[colIndex];
+    if (widthInput || distributeCols) {
+      clone.style.tableLayout = 'fixed';
+      clonedRows.forEach(row => [...row.cells].forEach((c, index) => {
+        if (distributeCols) c.style.width = `${100 / cols}%`;
+        else if (index === colIndex) c.style.width = `${w}px`;
+      }));
+    }
+    if (distributeRows) {
+      const average = table.getBoundingClientRect().height / scale / rows.length;
+      clonedRows.forEach(row => { row.style.height = `${Math.round(average * 100) / 100}px`; });
+    } else if (heightInput) clonedRows[rowIndex].style.height = `${h}px`;
+    if (fill) clonedCell.style.backgroundColor = $('#cellFill').value;
+    if (border) clonedCell.style.border = `${borderWidth}px solid ${$('#cellBorder').value}`;
+    closeModal();
+    const range = document.createRange(); range.selectNode(table); page.focus();
+    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+    programmaticEdit = true;
+    let inserted; try { inserted = document.execCommand('insertHTML', false, clone.outerHTML); } finally { programmaticEdit = false; }
+    if (!inserted) { toast('Could not update table', 'error'); return; }
+    editorRange = sel.rangeCount && page.contains(sel.anchorNode) ? sel.getRangeAt(0).cloneRange() : null;
+    saveCurrentContent(); updateWordCount(); save();
+  });
+}
 
 function editTable(table, cell, action) {
   if (!table || !cell || !page.contains(table) || mode === 'viewing') return;
@@ -1128,6 +1711,7 @@ function editTable(table, cell, action) {
   if (action === 'header-add' && hasHeaderRow(table)) { toast('This table already has a header row', 'info'); return; }
   if (action === 'row-delete' && rows.length === 1) { toast('Use Delete table to remove the last row', 'info'); return; }
   if (action === 'col-delete' && columns === 1) { toast('Use Delete table to remove the last column', 'info'); return; }
+  if (['col-left','col-right'].includes(action) && table.querySelector(':scope > colgroup, :scope > col')) { toast('Moving columns with column-group styling is not supported', 'info'); return; }
   const clone = table.cloneNode(true);
   const cloneRows = [...clone.rows];
   const cloneRow = cloneRows[rowIndex];
@@ -1144,6 +1728,28 @@ function editTable(table, cell, action) {
       row.appendChild(emptyCell(afterHeader ? 'td' : existing.tagName.toLowerCase()));
     }
     cloneRow.parentElement.insertBefore(row, action === 'row-before' ? cloneRow : cloneRow.nextSibling);
+  } else if (action === 'row-up' || action === 'row-down') {
+    const sibling = action === 'row-up' ? cloneRow.previousElementSibling : cloneRow.nextElementSibling;
+    // Keep headers in place and do not move between table sections.
+    if (!sibling || (hasHeaderRow(clone) && (cloneRow === clone.rows[0] || sibling === clone.rows[0]))) { toast('Cannot move this row further', 'info'); return; }
+    cloneRow.parentElement.insertBefore(cloneRow, action === 'row-up' ? sibling : sibling.nextSibling);
+  } else if (action === 'col-left' || action === 'col-right') {
+    const other = colIndex + (action === 'col-left' ? -1 : 1);
+    if (other < 0 || other >= columns) { toast('Cannot move this column further', 'info'); return; }
+    cloneRows.forEach(row => {
+      const moving = row.cells[colIndex], sibling = row.cells[other];
+      row.insertBefore(moving, action === 'col-left' ? sibling : sibling.nextSibling);
+    });
+  } else if (action === 'sort-ascending' || action === 'sort-descending') {
+    const section = cloneRow.parentElement;
+    if (section.tagName === 'THEAD' || section.tagName === 'TFOOT') { toast('Select a body row to sort', 'info'); return; }
+    const body = [...section.children].filter(row => row.tagName === 'TR' && !(hasHeaderRow(clone) && row === clone.rows[0]));
+    if (body.length < 2) { toast('At least two body rows are needed to sort', 'info'); return; }
+    const collator = new Intl.Collator(undefined, { numeric:true, sensitivity:'base' });
+    const sorted = body.map((row, index) => ({row, index, value:row.cells[colIndex].textContent.trim()}));
+    sorted.sort((a, b) => (action === 'sort-ascending' ? 1 : -1) * collator.compare(a.value, b.value) || a.index - b.index);
+    const last = body[body.length - 1], next = last.nextSibling;
+    sorted.forEach(({row}) => section.insertBefore(row, next));
   } else if (action === 'row-delete') cloneRow.remove();
   else if (action === 'col-delete') cloneRows.forEach(row => row.cells[colIndex].remove());
   else if (action === 'col-before' || action === 'col-after') cloneRows.forEach(row => {
@@ -1174,6 +1780,27 @@ page.addEventListener('keydown', e => {
   selection.removeAllRanges(); selection.addRange(range); editorRange = range.cloneRange();
 });
 
+function insertPageBreak() {
+  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
+  focusPage(); const sel = getSelection();
+  if (!sel.rangeCount || !sel.isCollapsed || !page.contains(sel.anchorNode)) { toast('Place the caret where the break should go', 'info'); return; }
+  const node = sel.anchorNode.nodeType === Node.ELEMENT_NODE ? sel.anchorNode : sel.anchorNode.parentElement;
+  if (node?.closest('table,ul,ol,a,[contenteditable="false"]')) { toast('Place page breaks outside tables, lists and links', 'info'); return; }
+  exec('insertHTML', '<hr class="megadoc-page-break" data-megadoc-page-break="true" role="button" tabindex="0" aria-label="Page break; activate to remove">');
+}
+function removePageBreak(marker) {
+  if (!page.contains(marker) || mode === 'viewing') return;
+  openModal('Page break', '<p>Remove this explicit page break? The editor remains a continuous page, while printing starts a new page at this marker.</p>', '<button class="btn text" id="mCancel">Cancel</button><button class="btn danger" id="mOk">Remove</button>');
+  $('#mCancel').addEventListener('click', closeModal);
+  const tab = state.activeTabId;
+  $('#mOk').addEventListener('click', () => {
+    if (tab !== state.activeTabId || !page.contains(marker) || mode === 'viewing') { closeModal(); return; }
+    closeModal(); const r = document.createRange(); r.selectNode(marker); page.focus(); const s = getSelection(); s.removeAllRanges(); s.addRange(r); editorRange = r.cloneRange(); exec('insertHTML', '');
+  });
+}
+page.addEventListener('click', e => { const marker = e.target.closest('[data-megadoc-page-break]'); if (marker && page.contains(marker) && mode !== 'viewing') { e.preventDefault(); removePageBreak(marker); } });
+page.addEventListener('keydown', e => { const marker = e.target.closest?.('[data-megadoc-page-break]'); if (marker && page.contains(marker) && mode !== 'viewing' && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); removePageBreak(marker); } });
+
 function insertTable() {
   if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'error'); return; }
   openModal('Insert table', `<div class="table-fields">
@@ -1198,31 +1825,84 @@ function insertTable() {
   });
 }
 let findIndex = -1;
+let findError = '';
 function findInTab() {
   if (!getTab(state.activeTabId)) { toast('Create a tab first', 'search_off'); return; }
   $('#findbar').classList.add('open'); $('#findInput').focus(); $('#findInput').select(); runFind();
 }
 function findRanges(q) {
-  const walker = document.createTreeWalker(page, NodeFilter.SHOW_TEXT);
-  const nodes = []; let text = '', node;
-  while ((node = walker.nextNode())) { nodes.push({node, start: text.length}); text += node.data; }
-  const ranges = []; const needle = q.toLowerCase(); const haystack = text.toLowerCase();
-  if (!needle) return ranges;
-  let pos = 0, hit;
-  while ((hit = haystack.indexOf(needle, pos)) !== -1) {
-    const start = nodes.find(n => hit >= n.start && hit < n.start + n.node.length);
-    const end = nodes.find(n => hit + needle.length > n.start && hit + needle.length <= n.start + n.node.length);
-    if (start && end) { const r = document.createRange(); r.setStart(start.node, hit - start.start); r.setEnd(end.node, hit + needle.length - end.start); ranges.push(r); }
-    pos = hit + needle.length;
+  findError = '';
+  if (!q) return [];
+  let pattern;
+  try {
+    const slash = String.fromCharCode(92);
+    const source = $('#findRegex').checked ? q : Array.from(q, c => '.*+?^${}()|[]'.includes(c) || c === slash ? slash + c : c).join('');
+    pattern = new RegExp(source, $('#findCase').checked ? 'gu' : 'giu');
+  } catch { findError = 'Invalid regular expression'; return []; }
+  // Search within each text block, including inline formatting, but never across
+  // paragraphs, table cells, or non-editable controls (which could destroy them).
+  const walker = document.createTreeWalker(page, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+  const groups = []; let node, previous;
+  while ((node = walker.nextNode())) {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      if (node.matches('br,img,input,hr,canvas,svg,video,audio,iframe,button,[contenteditable="false"]')) previous = null;
+      continue;
+    }
+    const parent = node.parentElement;
+    if (!parent || parent.closest('script,style,[contenteditable="false"],button')) { previous = null; continue; }
+    const block = parent.closest('p,div,h1,h2,h3,h4,h5,h6,blockquote,pre,li,td,th') || page;
+    if (!previous || previous.block !== block) { previous = {block, text:'', nodes:[]}; groups.push(previous); }
+    previous.nodes.push({node, start:previous.text.length}); previous.text += node.data;
+  }
+  const ranges = [];
+  for (const group of groups) {
+    pattern.lastIndex = 0;
+    let match;
+    while ((match = pattern.exec(group.text))) {
+      if (!match[0].length) { pattern.lastIndex += pattern.unicode && group.text.codePointAt(pattern.lastIndex) > 0xffff ? 2 : 1; continue; }
+      const hit = match.index, endOffset = hit + match[0].length;
+      const start = group.nodes.find(n => hit >= n.start && hit < n.start + n.node.length);
+      const end = group.nodes.find(n => endOffset > n.start && endOffset <= n.start + n.node.length);
+      if (start && end) { const range = document.createRange(); range.setStart(start.node, hit - start.start); range.setEnd(end.node, endOffset - end.start); ranges.push(range); }
+    }
   }
   return ranges;
 }
+function refreshFindCount() {
+  const ranges = findRanges($('#findInput').value);
+  findIndex = ranges.length ? Math.max(0, Math.min(findIndex, ranges.length - 1)) : -1;
+  $('#findCount').textContent = findError || (ranges.length ? `${findIndex + 1} / ${ranges.length}` : ($('#findInput').value ? 'No matches' : ''));
+}
 function showFindResult(ranges) {
-  $('#findCount').textContent = ranges.length ? `${findIndex + 1} / ${ranges.length}` : ($('#findInput').value ? 'No matches' : '');
+  $('#findCount').textContent = findError || (ranges.length ? `${findIndex + 1} / ${ranges.length}` : ($('#findInput').value ? 'No matches' : ''));
   if (ranges.length) { const sel = getSelection(); sel.removeAllRanges(); sel.addRange(ranges[findIndex]); ranges[findIndex].startContainer.parentElement?.scrollIntoView({block:'nearest'}); }
 }
 function runFind() { const ranges = findRanges($('#findInput').value); findIndex = ranges.length ? 0 : -1; showFindResult(ranges); }
-function findStep(dir) { const ranges = findRanges($('#findInput').value); if (!ranges.length) return; findIndex = (findIndex + dir + ranges.length) % ranges.length; showFindResult(ranges); }
+function findStep(dir) { const ranges = findRanges($('#findInput').value); if (!ranges.length) { showFindResult(ranges); return; } findIndex = (Math.max(0, findIndex) + dir + ranges.length) % ranges.length; showFindResult(ranges); }
+function replaceFind(all = false) {
+  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
+  let ranges = findRanges($('#findInput').value);
+  if (!ranges.length) { findIndex = -1; showFindResult(ranges); return; }
+  const text = $('#replaceInput').value;
+  const total = all ? ranges.length : 1;
+  let index = all ? ranges.length - 1 : Math.max(0, Math.min(findIndex, ranges.length - 1));
+  let changed = 0;
+  // Work backwards so replacements cannot shift earlier matches. Each native
+  // insertion is undoable; regular-expression replacement text is literal.
+  for (let remaining = total; remaining > 0 && index >= 0; remaining--, index--) {
+    ranges = findRanges($('#findInput').value);
+    const range = ranges[index]; if (!range || !page.contains(range.commonAncestorContainer)) break;
+    page.focus(); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+    programmaticEdit = true;
+    let ok; try { ok = document.execCommand('insertText', false, text); } finally { programmaticEdit = false; }
+    if (!ok) break;
+    changed++;
+  }
+  const sel = getSelection(); if (sel.rangeCount && page.contains(sel.anchorNode)) editorRange = sel.getRangeAt(0).cloneRange();
+  saveCurrentContent(); updateWordCount(); save();
+  ranges = findRanges($('#findInput').value); findIndex = ranges.length ? Math.min(Math.max(index + 1, 0), ranges.length - 1) : -1; showFindResult(ranges);
+  toast(`${changed} replacement${changed === 1 ? '' : 's'}`, 'find_replace');
+}
 function closeFind() { $('#findbar').classList.remove('open'); }
 
 
@@ -1236,23 +1916,134 @@ function exportJSON() {
   URL.revokeObjectURL(a.href);
   toast('Exported as JSON', 'download');
 }
+// Local formats intentionally operate on one tab; JSON remains the full backup.
+function exportLocalContent(format) {
+  const tab = getTab(state.activeTabId);
+  if (!tab) { toast('Create a tab first', 'info'); return; }
+  if (format === 'html' && !window.DOMPurify) { toast('HTML sanitizer is unavailable', 'error'); return; }
+  saveCurrentContent();
+  let output, type, extension;
+  if (format === 'text') { const notes = footnoteEntries(); output = page.innerText + (notes.length ? '\n\nFootnotes (end of tab):\n' + notes.map(n => `[${n.number}] ${n.text}`).join('\n') : ''); type = 'text/plain;charset=utf-8'; extension = 'txt'; }
+  else {
+    // Export is a sanitized copy: executable markup is never written as a page.
+    const safe = DOMPurify.sanitize(page.innerHTML, {USE_PROFILES:{html:true,mathMl:true}});
+    output = `<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(tab.title || 'MegaDoc tab')}</title><style>${$('#paragraphStyleRules').textContent.replace(/\.page/g, 'body')} @media print{hr[data-megadoc-page-break]{break-before:page;page-break-before:always;border:0;height:0;margin:0}} @supports not (object-view-box:inset(1%)){img[data-megadoc-crop]{object-fit:contain;aspect-ratio:auto!important;height:auto!important}}</style></head><body>\n${safe}\n${makeFootnotesSection()?.outerHTML || ''}\n</body></html>\n`;
+    type = 'text/html;charset=utf-8'; extension = 'html';
+  }
+  const file = new Blob([output], {type}); const a = document.createElement('a');
+  a.href = URL.createObjectURL(file); a.download = `${(tab.title || 'MegaDoc tab').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_')}.${extension}`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); toast(`Current tab exported as ${extension.toUpperCase()}`, 'download');
+}
+function localImportDialog() {
+  openModal('Import text, HTML, DOCX or ODT', `<p>Choose a plain text, HTML, Word .docx or OpenDocument .odt file to create a <b>new root tab</b>. Existing tabs are not replaced.</p><p>HTML, Word and OpenDocument files are converted and sanitized; unsupported formatting, embedded objects, scripts and document features may be lost. Images with external URLs may contact their host. Text loses formatting; JSON is the complete MegaDoc backup format.</p><p>Only import files you trust. Maximum file size: 10 MB.</p>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Choose file</button>`);
+  $('#mCancel').addEventListener('click', closeModal);
+  $('#mOk').addEventListener('click', () => { closeModal(); $('#localContentFile').click(); });
+}
+function sanitizeImportedHTML(source) {
+  if (!window.DOMPurify) throw new Error('HTML sanitizer is unavailable');
+  // Keep basic rich text, not embedded executable or interactive documents.
+  const safe = DOMPurify.sanitize(source, {
+    ALLOWED_TAGS:['p','div','br','b','strong','i','em','u','s','strike','span','h1','h2','h3','h4','h5','h6','a','ul','ol','li','blockquote','pre','code','table','thead','tbody','tfoot','tr','td','th','img','hr','sup','sub'],
+    ALLOWED_ATTR:['href','src','style','alt','title','width','height','colspan','rowspan','start','value','reversed'],
+    ALLOW_DATA_ATTR:false, ALLOW_ARIA_ATTR:false
+  });
+  const doc = new DOMParser().parseFromString(safe, 'text/html');
+  const allowedStyles = new Set(['color','background-color','font-family','font-size','font-weight','font-style','text-decoration','text-align','line-height','letter-spacing','text-indent','margin-left','margin-right','margin-top','margin-bottom','padding','padding-left','padding-right','border','border-color','border-width','border-style','width','height','max-width','vertical-align','list-style-type','white-space']);
+  for (const el of doc.body.querySelectorAll('*')) {
+    if (el.hasAttribute('style')) {
+      const original = el.style, keep = [];
+      for (let i = 0; i < original.length; i++) { const key = original[i], value = original.getPropertyValue(key); if (allowedStyles.has(key) && !/url\s*\(|expression\s*\(|var\s*\(|@|\\/i.test(value)) keep.push(`${key}: ${value}`); }
+      if (keep.length) el.setAttribute('style', keep.join('; ')); else el.removeAttribute('style');
+    }
+    if (el.hasAttribute('href') && !/^(https?:|mailto:|#)/i.test(el.getAttribute('href').trim())) el.removeAttribute('href');
+    if (el.hasAttribute('src') && !/^(https?:|data:image\/(?:png|jpeg|gif|webp);base64,)/i.test(el.getAttribute('src').trim())) el.removeAttribute('src');
+    if (el.tagName === 'A' && el.hasAttribute('href') && !el.getAttribute('href').startsWith('#')) { el.setAttribute('target','_blank'); el.setAttribute('rel','noopener noreferrer'); }
+  }
+  return doc.body.innerHTML;
+}
+function convertDocxLocally(buffer) {
+  return new Promise((resolve,reject) => {
+    let worker;
+    try { worker = new Worker('js/docx-import-worker.js'); }
+    catch { reject(new Error('Word import requires a local web server and worker support')); return; }
+    const timer = setTimeout(() => { worker.terminate(); reject(new Error('Word conversion timed out')); }, 30000);
+    worker.onmessage = event => { clearTimeout(timer); worker.terminate(); if (event.data?.error) reject(new Error(event.data.error)); else if (typeof event.data?.html !== 'string') reject(new Error('Invalid Word conversion result')); else resolve(event.data.html); };
+    worker.onerror = () => { clearTimeout(timer); worker.terminate(); reject(new Error('Word converter could not start')); };
+    worker.postMessage(buffer, [buffer]);
+  });
+}
+function runOfficeWorker(path, payload, transfer = []) {
+  return new Promise((resolve,reject) => {
+    let worker; try { worker = new Worker(path); } catch { reject(new Error('This operation requires worker support and a local web server')); return; }
+    const timer = setTimeout(()=>{worker.terminate();reject(new Error('Conversion timed out'));},30000);
+    worker.onmessage = event => { clearTimeout(timer); worker.terminate(); if (event.data?.error) reject(new Error(event.data.error)); else resolve(event.data); };
+    worker.onerror = () => {clearTimeout(timer);worker.terminate();reject(new Error('Converter could not start'));};
+    try { worker.postMessage(payload,transfer); } catch (err) { clearTimeout(timer);worker.terminate();reject(err); }
+  });
+}
+function officeExportHTML(format) {
+  const template = document.createElement('template'); template.innerHTML = DOMPurify.sanitize(page.innerHTML,{USE_PROFILES:{html:true,mathMl:true}});
+  for (const marker of template.content.querySelectorAll('[data-megadoc-page-break]')) { const next = marker.nextElementSibling; if (next) next.style.breakBefore = 'page'; marker.remove(); }
+  const notes = makeFootnotesSection();
+  if (notes) {
+    if (format === 'docx') { notes.setAttribute('role','doc-footnotes'); notes.querySelectorAll('li').forEach(li=>li.setAttribute('role','doc-footnote')); template.content.querySelectorAll('[data-megadoc-footnote]').forEach(ref=>ref.setAttribute('role','doc-noteref')); }
+    template.content.append(notes);
+  }
+  const wrap = document.createElement('div'); wrap.append(template.content); return wrap.innerHTML;
+}
+function exportOfficeDialog(format) {
+  const tab = getTab(state.activeTabId); if (!tab) { toast('Create a tab first','info'); return; }
+  if (!window.DOMPurify) { toast('The HTML sanitizer is unavailable','error'); return; }
+  const id = state.activeTabId;
+  openModal(`Export current tab as ${format.toUpperCase()}`, `<p>Exports only this tab. Other tabs, comments, history and MegaDoc-specific settings are not included. Basic text, headings, lists and tables are converted; some formatting, equations, images, links, footnotes and page layout may change or be omitted. Remote images are not downloaded.</p><p>Export JSON for a complete MegaDoc backup.</p>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Export</button>`);
+  $('#mCancel').addEventListener('click',closeModal);
+  $('#mOk').addEventListener('click',async()=>{
+    if (state.activeTabId !== id || !getTab(id)) {closeModal();toast('Select the tab again','info');return;}
+    saveCurrentContent(); const html=officeExportHTML(format), title=tab.title || 'MegaDoc tab', setup=pageSetupValues(), dim=PAPER_SIZES[setup.paper], width=setup.orientation === 'landscape' ? dim[1] : dim[0], height=setup.orientation === 'landscape' ? dim[0] : dim[1];
+    closeModal(); toast(`Exporting ${format.toUpperCase()} locally…`,'download');
+    try {
+      const response = format === 'docx' ? await runOfficeWorker('js/docx-export-worker.js',{html,setup:{width,height,orientation:setup.orientation,left:marginValue('left'),right:marginValue('right')}}) : await runOfficeWorker('js/odf-worker.js',{operation:'export',html,options:{pageFormat:setup.paper === 'a4' ? 'A4' : setup.paper,orientation:setup.orientation,metadata:{title},marginTop:'0.75in',marginBottom:'0.75in',marginLeft:`${marginValue('left')/96}in`,marginRight:`${marginValue('right')/96}in`}});
+      const blob = format === 'docx' ? response.blob : new Blob([response.buffer],{type:'application/vnd.oasis.opendocument.text'});
+      if (!(blob instanceof Blob) || !blob.size) throw new Error('Converter returned an empty file');
+      const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`${title.replace(/[\\/:*?"<>|\x00-\x1f]/g,'_')}.${format}`; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+      if (response.warnings?.length) toast(`Exported with ${response.warnings.length} conversion warning(s); check the file`,'info'); else toast(`Exported ${format.toUpperCase()}; check formatting in the destination app`,'download');
+    } catch (err) {toast(`Export failed: ${err.message}`,'error');}
+  });
+}
+$('#localContentFile').addEventListener('change', async e => {
+  const file = e.target.files?.[0]; e.target.value = '';
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) { toast('File exceeds 10 MB', 'error'); return; }
+  const isHtml = /\.html?$/i.test(file.name), isText = /\.txt$/i.test(file.name), isDocx = /\.docx$/i.test(file.name), isOdt = /\.odt$/i.test(file.name);
+  if (!isHtml && !isText && !isDocx && !isOdt) { toast('Choose a .txt, .html, .docx or .odt file', 'error'); return; }
+  try {
+    let html;
+    if (isDocx) { toast('Converting Word document locally…', 'upload_file'); html = sanitizeImportedHTML(await convertDocxLocally(await file.arrayBuffer())); }
+    else if (isOdt) { toast('Converting OpenDocument locally…','upload_file'); const buffer = await file.arrayBuffer(); const result = await runOfficeWorker('js/odf-worker.js',{operation:'import',buffer},[buffer]); html = sanitizeImportedHTML(result.html); }
+    else if (isHtml) html = sanitizeImportedHTML(await file.text());
+    else { const text = await file.text(); const div = document.createElement('div'); div.style.whiteSpace = 'pre-wrap'; div.textContent = text.replace(/\r\n?/g, '\n'); html = div.outerHTML; }
+    const name = file.name.replace(/\.(?:txt|html?|docx|odt)$/i, '').slice(0, 120) || 'Imported tab';
+    addTab(null, name); page.innerHTML = html; saveCurrentContent(); updateWordCount(); save();
+    toast(isDocx || isOdt ? 'Imported into a new tab; some document formatting may be lost' : 'Imported into a new tab', 'upload_file');
+  } catch (err) { toast(`Import failed: ${err.message}`, 'error'); }
+});
 function restoreLegacy() {
   let old;
   try { old = JSON.parse(localStorage.getItem('megadoc-v1')); } catch {}
   if (!old || !old.tabs || !Array.isArray(old.roots)) { toast('No previous local document found', 'info'); return; }
   confirmModal('Restore previous document?', '<p>This replaces your current document with the previous locally saved version, which may include the old example tabs. Export your current document first if needed.</p>', 'Restore', () => {
-    state = normalizeState(old); $('#docTitle').value = state.docTitle || 'MegaDoc';
-    updateAvatar(); applyPageTheme(); loadTabContent(); renderTree(); setZoom(state.zoom || 100); save(true);
+    state = normalizeState(old); paragraphStyleUndo = []; paragraphStyleRedo = []; applyParagraphStyles(); $('#docTitle').value = state.docTitle || 'MegaDoc';
+    updateAvatar(); applyPageTheme(); applyPageSetup(); loadTabContent(); renderTree(); setZoom(state.zoom || 100); save(true);
     toast('Previous document restored', 'restore');
   });
 }
 function resetAll() {
   confirmModal('Reset MegaDoc?', '<p>This deletes <b>all tabs and content</b> stored in this browser and starts a new empty document. Export a backup first if you need it.</p>', 'Reset everything', () => {
     localStorage.removeItem(LS_KEY);
-    state = seedState();
+    state = seedState(); paragraphStyleUndo = []; paragraphStyleRedo = []; applyParagraphStyles();
     $('#docTitle').value = state.docTitle; document.title = 'MegaDoc — MegaDoc';
     updateAvatar(); applyPageTheme();
-    save(true); loadTabContent(); renderTree(); setZoom(state.zoom || 100);
+    save(true); applyPageSetup(); loadTabContent(); renderTree(); setZoom(state.zoom || 100);
     toast('MegaDoc reset', 'restart_alt');
   });
 }
@@ -1308,15 +2099,45 @@ function showOutline() {
     walk(t.children, depth + 1);
   });
   walk(state.roots, 0);
-  openModal('Outline — all tabs', `<div>${rows.join('') || '<p>No tabs yet.</p>'}</div>`, `<button class="btn text" id="mDone">Done</button>`);
-  $('#modal').querySelectorAll('.outline-item').forEach(b => b.addEventListener('click', () => { closeModal(); selectTab(b.dataset.id); }));
+  const headings = getTab(state.activeTabId) ? [...page.querySelectorAll('h1,h2,h3,h4,h5,h6')] : [];
+  const headingRows = headings.map((h, i) => `<button class="outline-item heading-outline-item" data-heading="${i}" style="padding-left:${8 + (Number(h.tagName[1]) - 1) * 12}px"><span class="heading-level">H${h.tagName[1]}</span>${esc(h.textContent.trim() || '(Untitled heading)')}</button>`).join('');
+  openModal('Outline', `<h3>Current tab headings</h3><div>${headingRows || '<p>No headings in the current tab.</p>'}</div><h3>All tabs</h3><div>${rows.join('') || '<p>No tabs yet.</p>'}</div>`, `<button class="btn text" id="mDone">Done</button>`);
+  $('#modal').querySelectorAll('[data-heading]').forEach(button => button.addEventListener('click', () => {
+    const heading = headings[Number(button.dataset.heading)]; closeModal();
+    if (heading && page.contains(heading)) navigateToHeading(heading);
+  }));
+  $('#modal').querySelectorAll('[data-id]').forEach(b => b.addEventListener('click', () => { closeModal(); selectTab(b.dataset.id); }));
   $('#mDone').addEventListener('click', closeModal);
+}
+function navigateToHeading(heading) {
+  if (!heading || !page.contains(heading)) return;
+  const range = document.createRange(); range.selectNodeContents(heading); range.collapse(true);
+  page.focus(); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+  editorRange = range.cloneRange(); heading.scrollIntoView({block: 'center', behavior: 'auto'});
+  syncStyleLabel(sel.anchorNode); syncFormatButtons();
+}
+function navigateHeading(direction) {
+  const headings = [...page.querySelectorAll('h1,h2,h3,h4,h5,h6')];
+  if (!headings.length) { toast('No headings in this tab', 'info'); return; }
+  const sel = getSelection();
+  const range = sel.rangeCount && page.contains(sel.anchorNode) ? sel.getRangeAt(0) : null;
+  const candidates = range ? headings.filter(h => {
+    const r = document.createRange(); r.selectNodeContents(h); r.collapse(true);
+    return direction > 0 ? r.compareBoundaryPoints(Range.START_TO_START, range) > 0 : r.compareBoundaryPoints(Range.START_TO_START, range) < 0;
+  }) : headings;
+  const target = direction > 0 ? candidates[0] : candidates[candidates.length - 1];
+  if (target) navigateToHeading(target); else toast('No more headings in this direction', 'info');
 }
 
 function showShortcuts() {
   openModal('Keyboard shortcuts', `
     <table>
       <tr><td><kbd>Ctrl</kbd>+<kbd>B</kbd> / <kbd>I</kbd> / <kbd>U</kbd></td><td>Bold / Italic / Underline</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>.</kbd> / <kbd>,</kbd></td><td>Superscript / Subscript</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>0–6</kbd></td><td>Normal / Heading style</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L/E/R/J</kbd></td><td>Align left / center / right / justify</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>7/8</kbd></td><td>Numbered / bulleted list</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>↑/↓</kbd></td><td>Previous / next heading</td></tr>
       <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd></td><td>Insert link</td></tr>
       <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Find in tab</td></tr>
       <tr><td><kbd>Ctrl</kbd>+<kbd>P</kbd></td><td>Print</td></tr>
@@ -1369,9 +2190,31 @@ function tabIconPicker(id) {
   $('#tabEmojiCancel').addEventListener('click', closeModal);
 }
 
+const SYMBOLS = {
+  Math: [['±','plus minus'],['×','multiply'],['÷','divide'],['≠','not equal'],['≤','less than or equal'],['≥','greater than or equal'],['∞','infinity'],['√','square root'],['∑','sum'],['∫','integral'],['∂','partial differential'],['π','pi'],['α','alpha'],['β','beta'],['θ','theta'],['Δ','delta']],
+  Arrows: [['←','left arrow'],['↑','up arrow'],['→','right arrow'],['↓','down arrow'],['↔','left right arrow'],['⇒','right double arrow'],['⇐','left double arrow']],
+  Punctuation: [['—','em dash'],['–','en dash'],['…','ellipsis'],['“','left quotation mark'],['”','right quotation mark'],['‘','left single quotation mark'],['’','right single quotation mark'],['•','bullet'],['©','copyright'],['®','registered'],['™','trademark'],['§','section'],['¶','paragraph']],
+  Currency: [['$','dollar'],['€','euro'],['£','pound'],['¥','yen'],['₹','rupee'],['₩','won'],['¢','cent']],
+  Emoji: EMOJIS.map(e => [e, 'emoji']),
+};
 function emojiPicker() {
-  openModal('Insert emoji', `<div class="emoji-grid">${EMOJIS.map(e => `<button data-e="${e}">${e}</button>`).join('')}</div>`);
-  $('#modal').querySelectorAll('[data-e]').forEach(b => b.addEventListener('click', () => { exec('insertText', b.dataset.e); closeModal(); }));
+  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
+  openModal('Emoji & special characters', `<div class="field"><label for="symbolSearch">Search by name or Unicode (for example U+2192)</label><input id="symbolSearch" autocomplete="off" placeholder="Search symbols…"></div><div class="field"><label for="symbolCategory">Category</label><select id="symbolCategory"><option>All</option>${Object.keys(SYMBOLS).map(k => `<option>${k}</option>`).join('')}</select></div><div class="emoji-grid" id="symbolGrid"></div><p id="symbolStatus" aria-live="polite"></p>`, `<button class="btn text" id="mDone">Done</button>`);
+  const search = $('#symbolSearch'), category = $('#symbolCategory'), grid = $('#symbolGrid');
+  function draw() {
+    const q = search.value.trim().toLowerCase();
+    let entries = Object.entries(SYMBOLS).filter(([name]) => category.value === 'All' || category.value === name).flatMap(([name, values]) => values.map(([char, description]) => ({char, description, name})));
+    entries = entries.filter(({char, description, name}) => !q || char.includes(q) || description.includes(q) || name.toLowerCase().includes(q) || ('u+' + char.codePointAt(0).toString(16)).includes(q));
+    const match = /^(?:u\+|0x)([0-9a-f]{1,6})$/i.exec(q);
+    if (match) {
+      const code = parseInt(match[1], 16);
+      if (code >= 0x20 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff) && !entries.some(e => e.char === String.fromCodePoint(code))) entries.unshift({ char: String.fromCodePoint(code), description: 'Unicode ' + q.toUpperCase(), name: 'Unicode' });
+    }
+    grid.innerHTML = entries.map(({char, description}) => `<button type="button" data-symbol="${esc(char)}" title="${esc(description)}" aria-label="${esc(description)} ${esc(char)}">${esc(char)}</button>`).join('');
+    $('#symbolStatus').textContent = entries.length ? '' : 'No matching characters.';
+    grid.querySelectorAll('[data-symbol]').forEach(button => button.addEventListener('click', () => { const value = button.dataset.symbol; closeModal(); exec('insertText', value); }));
+  }
+  search.addEventListener('input', draw); category.addEventListener('change', draw); $('#mDone').addEventListener('click', closeModal); draw();
 }
 
 function commandPalette() {
@@ -1497,6 +2340,238 @@ function linkModal() {
   $('#mOk').addEventListener('click', doInsert);
   $('#linkUrl').addEventListener('keydown', e => { if (e.key === 'Enter') doInsert(); });
 }
+// Internal links use tab IDs and bookmark IDs, scoped to their tab. Heading
+// links keep an index and title snapshot and fail safely if headings change.
+function bookmarkModal(existing = null) {
+  const tabId = state.activeTabId;
+  if (!getTab(tabId) || mode === 'viewing' || (existing && !page.contains(existing))) { toast('Open an editable tab first', 'edit_off'); return; }
+  if (!existing) { focusPage(); const sel = getSelection(); if (!sel.rangeCount || !page.contains(sel.anchorNode)) return; if (!sel.isCollapsed) { toast('Place the caret where the bookmark should go', 'info'); return; } const at = sel.anchorNode.nodeType === Node.ELEMENT_NODE ? sel.anchorNode : sel.anchorNode.parentElement; if (at?.closest('a,[contenteditable="false"]')) { toast('Place the bookmark outside a link or protected object', 'info'); return; } }
+  const key = existing?.dataset.megadocBookmark || `b-${uid()}-${uid()}`;
+  openModal(existing ? 'Edit bookmark' : 'Insert bookmark', `<div class="field"><label for="bookmarkName">Name</label><input id="bookmarkName" maxlength="100" value="${esc(existing?.dataset.bookmarkName || '')}" placeholder="Bookmark name"></div><p>Bookmarks belong to the current tab. Link to them from any tab using Insert → Link to tab, bookmark or heading.</p>`, `<button class="btn text" id="mCancel">Cancel</button>${existing ? '<button class="btn text" id="bookmarkRemove">Remove</button>' : ''}<button class="btn primary" id="mOk">${existing ? 'Save' : 'Insert'}</button>`);
+  $('#mCancel').addEventListener('click', closeModal); $('#bookmarkName').focus();
+  const apply = remove => {
+    const name = $('#bookmarkName').value.trim();
+    if (!remove && (!name || name.length > 100)) { toast('Enter a bookmark name', 'error'); return; }
+    if (state.activeTabId !== tabId || mode === 'viewing' || (existing && !page.contains(existing))) { closeModal(); toast('Select the location again', 'error'); return; }
+    const html = remove ? '' : `<a href="#" class="megadoc-bookmark" data-megadoc-bookmark="${esc(key)}" data-bookmark-name="${esc(name)}" title="${esc('Bookmark: ' + name)}" role="button" tabindex="0" aria-label="${esc('Edit bookmark: ' + name)}">🔖</a>`;
+    closeModal();
+    if (existing) { const range = document.createRange(); range.selectNode(existing); page.focus(); const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range); editorRange = range.cloneRange(); }
+    exec('insertHTML', html);
+  };
+  $('#mOk').addEventListener('click', () => apply(false)); $('#bookmarkRemove')?.addEventListener('click', () => apply(true));
+}
+function internalLinkModal() {
+  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
+  focusPage(); const selection = getSelection(); const selected = selection.rangeCount && page.contains(selection.anchorNode) ? selection.toString() : '';
+  if (!selection.rangeCount || !page.contains(selection.anchorNode) || !page.contains(selection.focusNode)) { toast('Select a location in the page first', 'info'); return; }
+  const selectedRange = selection.getRangeAt(0), parent = node => node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  const start = parent(selectedRange.startContainer), end = parent(selectedRange.endContainer), blockSelector = 'p,div,h1,h2,h3,h4,h5,h6,li,td,th,blockquote,pre';
+  if (start?.closest('a,[contenteditable="false"]') || end?.closest('a,[contenteditable="false"]') || (start?.closest(blockSelector) || page) !== (end?.closest(blockSelector) || page) || [...page.querySelectorAll('a,[contenteditable="false"]')].some(el => selectedRange.intersectsNode(el))) { toast('Choose text within one block and outside links or protected objects', 'info'); return; }
+  const sourceTab = state.activeTabId;
+  saveCurrentContent();
+  const targets = [];
+  const walk = ids => { for (const id of ids) { const tab = getTab(id); if (!tab) continue; targets.push({tab:id,type:'tab',name:pathTo(id).map(t=>t.title).join(' / ')}); const template = document.createElement('template'); template.innerHTML = tab.content; const nodes = [...template.content.querySelectorAll('h1,h2,h3,h4,h5,h6,[data-megadoc-bookmark]')].filter(n => !n.closest('[contenteditable="false"]')); let headingIndex = 0; for (const node of nodes) { if (node.hasAttribute('data-megadoc-bookmark')) targets.push({tab:id,type:'bookmark',key:node.dataset.megadocBookmark,name:`${tab.title} · Bookmark: ${node.dataset.bookmarkName || 'Unnamed'}`}); else { const text = node.textContent.trim() || '(Untitled heading)'; targets.push({tab:id,type:'heading',index:headingIndex++,text,headingId:node.id || '',name:`${tab.title} · ${node.tagName}: ${text}`}); } } walk(tab.children); } };
+  walk(state.roots);
+  openModal('Link to tab, bookmark or heading', `<div class="field"><label for="internalLinkText">Link text</label><input id="internalLinkText" value="${esc(selected)}" placeholder="Text to display"></div><div class="field"><label for="internalLinkTarget">Destination</label><select id="internalLinkTarget">${targets.map((t,i) => `<option value="${i}">${esc(t.name)}</option>`).join('')}</select></div><p>Links navigate within this MegaDoc. Update heading links if headings are renamed or reordered. Inserting a link replaces selected text with the text above.</p>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Insert link</button>`);
+  $('#mCancel').addEventListener('click', closeModal);
+  $('#mOk').addEventListener('click', () => {
+    const target = targets[Number($('#internalLinkTarget').value)], text = $('#internalLinkText').value.trim();
+    if (!target || !getTab(target.tab) || state.activeTabId !== sourceTab || mode === 'viewing') { closeModal(); toast('Select the link location again', 'error'); return; }
+    if (!text) { toast('Enter link text', 'error'); return; }
+    const data = target.type === 'bookmark' ? ` data-megadoc-bookmark-target="${esc(target.key)}"` : target.type === 'heading' ? ` data-megadoc-heading-index="${target.index}" data-megadoc-heading-text="${esc(target.text)}"${target.headingId ? ` data-megadoc-heading-id="${esc(target.headingId)}"` : ''}` : '';
+    closeModal(); exec('insertHTML', `<a href="#" data-megadoc-tab-target="${esc(target.tab)}"${data}>${esc(text)}</a>`);
+  });
+}
+function followInternalLink(link) {
+  const id = link.dataset.megadocTabTarget, key = link.dataset.megadocBookmarkTarget, index = link.dataset.megadocHeadingIndex, text = link.dataset.megadocHeadingText, headingId = link.dataset.megadocHeadingId;
+  if (!getTab(id)) { toast('The target tab no longer exists', 'info'); return; }
+  if (state.activeTabId !== id) selectTab(id);
+  let target;
+  if (key) { const matches = [...page.querySelectorAll('[data-megadoc-bookmark]')].filter(n => n.dataset.megadocBookmark === key); target = matches.length === 1 ? matches[0] : null; }
+  else if (index !== undefined) { const headings = [...page.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter(n => !n.closest('[contenteditable="false"]'));
+    if (headingId) { const matches = headings.filter(n => n.id === headingId); target = matches.length === 1 ? matches[0] : null; }
+    else { const matches = headings.filter(n => (n.textContent.trim() || '(Untitled heading)') === text); target = matches.length === 1 ? matches[0] : null; }
+  }
+  else target = page;
+  if (!target) { toast('The bookmark or heading changed, is ambiguous, or no longer exists', 'info'); return; }
+  target.scrollIntoView({block:'center', behavior:'smooth'});
+  if (mode !== 'viewing') { page.focus(); const range = document.createRange(); if (target === page) { range.selectNodeContents(page); range.collapse(true); } else { range.selectNode(target); range.collapse(true); } const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range); }
+}
+page.addEventListener('click', e => {
+  const link = e.target.closest('a[data-megadoc-tab-target]');
+  if (link && page.contains(link)) { e.preventDefault(); followInternalLink(link); return; }
+  const mark = e.target.closest('[data-megadoc-bookmark]');
+  if (mark && page.contains(mark) && mode !== 'viewing') { e.preventDefault(); bookmarkModal(mark); }
+});
+page.addEventListener('keydown', e => {
+  const mark = e.target.closest?.('[data-megadoc-bookmark]');
+  if (mark && page.contains(mark) && mode !== 'viewing' && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); bookmarkModal(mark); }
+});
+
+// Notes live on their reference anchors. Printable/end-of-tab notes are derived
+// outside the editor so saving, undo and older versions retain the source data.
+function footnoteEntries() {
+  const seen = new Set(), result = [];
+  for (const anchor of page.querySelectorAll('a[data-megadoc-footnote]')) {
+    const key = anchor.dataset.megadocFootnote, number = Number(anchor.dataset.footnoteNumber), text = anchor.dataset.footnoteText;
+    if (!key || seen.has(key) || !Number.isSafeInteger(number) || number < 1 || typeof text !== 'string') continue;
+    seen.add(key); result.push({key,number,text});
+  }
+  return result;
+}
+function makeFootnotesSection() {
+  const notes = footnoteEntries(); if (!notes.length) return null;
+  const section = document.createElement('section'), title = document.createElement('h2'), list = document.createElement('ol');
+  section.className = 'megadoc-footnotes'; title.textContent = 'Footnotes (end of tab)'; section.append(title);
+  for (const note of notes) {
+    const li = document.createElement('li'); li.value = note.number; li.id = `md-note-${note.key}`;
+    const text = document.createElement('span'); text.style.whiteSpace = 'pre-wrap'; text.textContent = note.text; li.append(text, ' ');
+    const back = document.createElement('a'); back.href = `#md-ref-${note.key}`; back.textContent = '↩'; back.setAttribute('aria-label', `Back to reference ${note.number}`); li.append(back); list.append(li);
+  }
+  section.append(list); return section;
+}
+addEventListener('beforeprint', () => { const out = $('#footnotesPrint'); out.replaceChildren(); const section = makeFootnotesSection(); if (section) out.append(section); });
+addEventListener('afterprint', () => $('#footnotesPrint').replaceChildren());
+function footnoteModal(existing = null) {
+  const tabId = state.activeTabId;
+  if (!getTab(tabId) || (existing && !page.contains(existing)) || (!existing && mode === 'viewing')) { toast('Open an editable tab first', 'edit_off'); return; }
+  if (!existing) {
+    focusPage(); const sel = getSelection();
+    if (!sel.rangeCount || !sel.isCollapsed || !page.contains(sel.anchorNode)) { toast('Place the caret where the reference should go', 'info'); return; }
+    const at = sel.anchorNode.nodeType === Node.ELEMENT_NODE ? sel.anchorNode : sel.anchorNode.parentElement;
+    if (at?.closest('a,[contenteditable="false"]')) { toast('Place the reference outside a link or protected object', 'info'); return; }
+  }
+  const readonly = mode === 'viewing', text = existing?.dataset.footnoteText || '';
+  openModal(readonly ? 'Footnote' : existing ? 'Edit footnote' : 'Insert footnote', `<div class="field"><label for="footnoteText">Note text</label><textarea id="footnoteText" rows="5" maxlength="5000" ${readonly ? 'readonly' : ''}>${esc(text)}</textarea></div><p>Notes are numbered within this tab. Paginated preview and its print option place notes at the bottom of the page; HTML and text exports keep linked or numbered endnotes. Numbers may have gaps after removal.</p>`, `<button class="btn text" id="mCancel">${readonly ? 'Close' : 'Cancel'}</button>${!readonly && existing ? '<button class="btn text" id="footnoteRemove">Remove</button>' : ''}${!readonly ? `<button class="btn primary" id="mOk">${existing ? 'Save' : 'Insert'}</button>` : ''}`);
+  $('#mCancel').addEventListener('click', closeModal); if (!readonly) $('#footnoteText').focus();
+  if (readonly) return;
+  const apply = remove => {
+    const value = $('#footnoteText').value.trim();
+    if (!remove && (!value || value.length > 5000)) { toast('Enter note text (up to 5000 characters)', 'info'); return; }
+    if (state.activeTabId !== tabId || mode === 'viewing' || (existing && !page.contains(existing))) { closeModal(); toast('Select the reference again', 'error'); return; }
+    if (!remove && existing && [...page.querySelectorAll('a[data-megadoc-footnote]')].filter(a => a.dataset.megadocFootnote === existing.dataset.megadocFootnote).length !== 1) { toast('Copied references share an ID; delete the duplicate before editing', 'info'); return; }
+    let anchor;
+    if (!remove) {
+      if (existing) anchor = existing.cloneNode(true);
+      else {
+        const entries = footnoteEntries(); let number = 1; for (const entry of entries) number = Math.max(number, entry.number + 1);
+        const key = `f-${uid()}-${uid()}`; anchor = document.createElement('a'); anchor.dataset.megadocFootnote = key; anchor.dataset.footnoteNumber = String(number); anchor.id = `md-ref-${key}`; anchor.href = `#md-note-${key}`;
+        const sup = document.createElement('sup'); sup.textContent = `[${number}]`; anchor.append(sup);
+      }
+      anchor.classList.add('megadoc-footnote-ref'); anchor.dataset.footnoteText = value; anchor.title = `Footnote ${anchor.dataset.footnoteNumber}: ${value}`; anchor.setAttribute('aria-label', `Footnote ${anchor.dataset.footnoteNumber}: ${value}`);
+    }
+    closeModal();
+    if (existing) { const r = document.createRange(); r.selectNode(existing); page.focus(); const s = getSelection(); s.removeAllRanges(); s.addRange(r); editorRange = r.cloneRange(); }
+    exec('insertHTML', remove ? '' : anchor.outerHTML);
+  };
+  $('#mOk').addEventListener('click', () => apply(false)); $('#footnoteRemove')?.addEventListener('click', () => apply(true));
+}
+page.addEventListener('click', e => { const ref = e.target.closest('a[data-megadoc-footnote]'); if (ref && page.contains(ref)) { e.preventDefault(); footnoteModal(ref); } });
+
+// Contents is saved as an ordinary table and a snapshot of heading targets.
+// It does not mutate headings or other tabs when generated.
+function contentsHeadings() { return [...page.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter(h => !h.closest('[contenteditable="false"],table[data-megadoc-toc]')); }
+function makeContentsTable() {
+  const headings = contentsHeadings(); if (!headings.length) return null;
+  const table = document.createElement('table'); table.className = 'megadoc-toc'; table.dataset.megadocToc = '1';
+  const body = table.createTBody(), header = body.insertRow().insertCell(); header.textContent = 'Contents'; header.className = 'megadoc-toc-title';
+  headings.forEach((heading,index) => {
+    const row = body.insertRow(), cell = row.insertCell(); cell.className = `toc-level-${heading.tagName[1]}`;
+    const a = document.createElement('a'); a.href = heading.id ? `#${heading.id}` : '#'; a.dataset.megadocTocIndex = String(index); a.dataset.megadocTocText = heading.textContent.trim() || '(Untitled heading)'; if (heading.id) a.dataset.megadocTocId = heading.id; a.textContent = a.dataset.megadocTocText;
+    cell.append(a);
+  });
+  return table;
+}
+function tocCommand(action) {
+  if (!getTab(state.activeTabId) || mode === 'viewing') { toast('Open an editable tab first', 'edit_off'); return; }
+  focusPage(); const sel = getSelection();
+  if (!sel.rangeCount || !page.contains(sel.anchorNode) || !page.contains(sel.focusNode)) { toast('Place the caret in the page first', 'info'); return; }
+  const node = sel.anchorNode.nodeType === Node.ELEMENT_NODE ? sel.anchorNode : sel.anchorNode.parentElement;
+  if (action === 'insert') {
+    if (!sel.isCollapsed || node?.closest('table,ul,ol,a,[contenteditable="false"]')) { toast('Place the caret outside tables, lists and links', 'info'); return; }
+    const table = makeContentsTable(); if (!table) { toast('Add a heading to this tab first', 'info'); return; }
+    exec('insertHTML', table.outerHTML); return;
+  }
+  const table = node?.closest('table[data-megadoc-toc]');
+  if (!table || !page.contains(table)) { toast('Place the caret inside the table of contents first', 'info'); return; }
+  if (action === 'update') {
+    const replacement = makeContentsTable(); if (!replacement) { toast('Add a heading to this tab first', 'info'); return; }
+    replaceEditedTable(table,replacement);
+  } else {
+    const r = document.createRange(); r.selectNode(table); page.focus(); sel.removeAllRanges(); sel.addRange(r); editorRange = r.cloneRange(); exec('insertHTML','');
+  }
+}
+page.addEventListener('click', e => {
+  const link = e.target.closest('a[data-megadoc-toc-index]');
+  if (!link || !page.contains(link)) return;
+  e.preventDefault();
+  const headings = contentsHeadings(), id = link.dataset.megadocTocId, text = link.dataset.megadocTocText; let target;
+  if (id) { const matches = headings.filter(h => h.id === id); target = matches.length === 1 ? matches[0] : null; }
+  else { const matches = headings.filter(h => (h.textContent.trim() || '(Untitled heading)') === text); target = matches.length === 1 ? matches[0] : null; }
+  if (!target) { toast('Headings changed or are ambiguous; update the table of contents', 'info'); return; }
+  target.scrollIntoView({block:'center',behavior:'smooth'});
+  if (mode !== 'viewing') { page.focus(); const r = document.createRange(); r.selectNodeContents(target); r.collapse(true); const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+});
+
+// Equations are stored as MathML plus the source. Both are ordinary HTML, so
+// an older reader can preserve and display them without loading a renderer.
+function equationMarkup(latex) {
+  if (!window.katex) throw new Error('Equation renderer is unavailable');
+  if (!latex.trim() || latex.length > 4000) throw new Error('Enter an equation of at most 4000 characters');
+  const math = window.katex.renderToString(latex, {output:'mathml', throwOnError:true, trust:false, strict:'error', maxExpand:100});
+  return `<span class="document-equation" data-megadoc-equation="${esc(latex)}" contenteditable="false" role="button" tabindex="0" aria-label="Edit equation">${math}</span>`;
+}
+function equationModal(existing = null) {
+  const tabId = state.activeTabId;
+  if (!getTab(tabId) || mode === 'viewing' || (existing && !page.contains(existing))) { toast('Open an editable tab first', 'edit_off'); return; }
+  const original = existing?.getAttribute('data-megadoc-equation') || '';
+  openModal(existing ? 'Edit equation' : 'Insert equation', `<div class="field"><label for="equationSource">Equation (TeX syntax)</label><textarea id="equationSource" rows="3" placeholder="For example: \\frac{a}{b} + x^2">${esc(original)}</textarea></div><p>Supports fractions, superscripts, subscripts, Greek letters and common mathematical symbols. All rendering stays on this device.</p><div class="equation-preview" id="equationPreview" aria-label="Equation preview"></div><p class="equation-error" id="equationError" role="alert"></p>`, `<button class="btn text" id="mCancel">Cancel</button>${existing ? '<button class="btn text" id="equationRemove">Remove</button>' : ''}<button class="btn primary" id="mOk">${existing ? 'Apply' : 'Insert'}</button>`);
+  const input = $('#equationSource'), preview = $('#equationPreview'), error = $('#equationError');
+  const update = () => {
+    if (!input.value.trim()) { preview.innerHTML = ''; error.textContent = ''; return false; }
+    try { preview.innerHTML = equationMarkup(input.value); error.textContent = ''; return true; }
+    catch (e) { preview.innerHTML = ''; error.textContent = e.message; return false; }
+  };
+  input.addEventListener('input', update); update(); input.focus();
+  $('#mCancel').addEventListener('click', closeModal);
+  const replace = html => {
+    if (!existing || state.activeTabId !== tabId || !page.contains(existing) || mode === 'viewing') { toast('Select the equation again', 'error'); return; }
+    // Include enclosing inline markup so replacing the equation does not strip links or styles.
+    let target = existing;
+    while (target.parentElement && target.parentElement !== page && !/^(P|DIV|H[1-6]|BLOCKQUOTE|PRE|LI|TD|TH|FIGURE|FIGCAPTION)$/.test(target.parentElement.tagName)) target = target.parentElement;
+    const copy = target.cloneNode(true);
+    if (target === existing) html = html || '';
+    else {
+      const all = [...target.querySelectorAll('[data-megadoc-equation]')], index = all.indexOf(existing);
+      const item = copy.querySelectorAll('[data-megadoc-equation]')[index];
+      if (!item) return;
+      if (html) { const template = document.createElement('template'); template.innerHTML = html; item.replaceWith(template.content); } else item.remove();
+      html = copy.outerHTML;
+    }
+    const range = document.createRange(); range.selectNode(target); page.focus();
+    const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    programmaticEdit = true; let ok;
+    try { ok = document.execCommand('insertHTML', false, html); } finally { programmaticEdit = false; }
+    if (!ok) { toast('Could not update equation', 'error'); return; }
+    editorRange = selection.rangeCount && page.contains(selection.anchorNode) ? selection.getRangeAt(0).cloneRange() : null;
+    saveCurrentContent(); updateWordCount(); save();
+  };
+  $('#mOk').addEventListener('click', () => {
+    if (!update()) { if (!input.value.trim()) error.textContent = 'Enter an equation.'; return; }
+    const html = equationMarkup(input.value); closeModal();
+    if (existing) replace(html); else if (state.activeTabId === tabId) exec('insertHTML', html);
+  });
+  if (existing) $('#equationRemove').addEventListener('click', () => { closeModal(); replace(''); });
+}
+page.addEventListener('click', e => {
+  const equation = e.target.closest('[data-megadoc-equation]');
+  if (equation && page.contains(equation) && mode !== 'viewing') { e.preventDefault(); equationModal(equation); }
+});
+page.addEventListener('keydown', e => {
+  const equation = e.target.closest('[data-megadoc-equation]');
+  if (equation && mode !== 'viewing' && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); equationModal(equation); }
+});
+
 function imageModal() {
   if (!getTab(state.activeTabId)) { toast('Create a tab first', 'image_not_supported'); return; }
   openModal('Insert image', `
@@ -1598,6 +2673,114 @@ function showProfile() {
   $('#mDone').addEventListener('click', closeModal);
 }
 
+/* Page setup changes document presentation, not editable HTML. Unknown fields
+   on existing saves are left intact; older saves continue using default sizing. */
+const PAPER_SIZES = { letter: [816, 1056, 'letter'], a4: [793.7, 1122.5, 'A4'], legal: [816, 1344, 'legal'] };
+function pageSetupValues() {
+  const setup = state.pageSetup;
+  const paper = Object.hasOwn(PAPER_SIZES, setup?.paper) ? setup.paper : 'letter';
+  return {paper, orientation:setup?.orientation === 'landscape' ? 'landscape' : 'portrait'};
+}
+function updatePrintPageSetup() {
+  const style = $('#printPageSetup');
+  if (!state.pageSetup || typeof state.pageSetup !== 'object') { style.textContent = ''; return; }
+  const {paper, orientation} = pageSetupValues();
+  const rule = `@page { size: ${PAPER_SIZES[paper][2]} ${orientation}; margin: 72px ${marginValue('right')}px 72px ${marginValue('left')}px; }`;
+  if (style.textContent !== rule) style.textContent = rule;
+}
+function applyPageSetup() {
+  const {paper, orientation} = pageSetupValues();
+  let [width, height] = PAPER_SIZES[paper];
+  if (orientation === 'landscape') [width, height] = [height, width];
+  document.documentElement.style.setProperty('--document-width', `${width}px`);
+  document.documentElement.style.setProperty('--document-height', `${height}px`);
+  updatePrintPageSetup();
+}
+const PRINT_BOXES = ['top-left','top-center','top-right','bottom-left','bottom-center','bottom-right'];
+function printLayoutValues(tab) {
+  const value = tab?.printLayout && typeof tab.printLayout === 'object' ? tab.printLayout : {};
+  return {header:typeof value.header === 'string' ? value.header.slice(0,150) : '', footer:typeof value.footer === 'string' ? value.footer.slice(0,150) : '', headerPosition:PRINT_BOXES.slice(0,3).includes(value.headerPosition) ? value.headerPosition : 'top-center', footerPosition:PRINT_BOXES.slice(3).includes(value.footerPosition) ? value.footerPosition : 'bottom-center', numberPosition:PRINT_BOXES.includes(value.numberPosition) ? value.numberPosition : 'none'};
+}
+const printLayoutHistory = new WeakMap();
+function printLayoutModal() {
+  const tab = getTab(state.activeTabId); if (!tab || mode === 'viewing') { toast('Open an editable tab first', 'info'); return; }
+  const id = state.activeTabId, values = printLayoutValues(tab), options = (prefix) => ['left','center','right'].map(p=>`<option value="${prefix}-${p}">${p[0].toUpperCase()+p.slice(1)}</option>`).join('');
+  openModal('Headers, footers & page numbers', `<p>These print settings apply to the current tab. Page numbers restart at one in each tab. Use Paginated preview to see the printed result. Settings undo and redo are separate from text undo and last until reload.</p><div class="field"><label for="printHeader">Header text</label><input id="printHeader" maxlength="150" value="${esc(values.header)}"></div><div class="field"><label for="printHeaderPosition">Header placement</label><select id="printHeaderPosition">${options('top')}</select></div><div class="field"><label for="printFooter">Footer text</label><input id="printFooter" maxlength="150" value="${esc(values.footer)}"></div><div class="field"><label for="printFooterPosition">Footer placement</label><select id="printFooterPosition">${options('bottom')}</select></div><div class="field"><label for="printNumberPosition">Page numbers</label><select id="printNumberPosition"><option value="none">None</option>${PRINT_BOXES.map(p=>`<option value="${p}">${p.replace('-', ' ')}</option>`).join('')}</select></div>`, `<button class="btn text" id="printUndo">Undo</button><button class="btn text" id="printRedo">Redo</button><button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Apply</button>`);
+  $('#printHeaderPosition').value=values.headerPosition; $('#printFooterPosition').value=values.footerPosition; $('#printNumberPosition').value=values.numberPosition;
+  let history = printLayoutHistory.get(tab); if (!history) {history={undo:[],redo:[]};printLayoutHistory.set(tab,history);}
+  const snapshot=()=>structuredClone(tab.printLayout ?? null);
+  const refresh=()=>{const v=printLayoutValues(tab); $('#printHeader').value=v.header; $('#printFooter').value=v.footer; $('#printHeaderPosition').value=v.headerPosition; $('#printFooterPosition').value=v.footerPosition; $('#printNumberPosition').value=v.numberPosition; $('#printUndo').disabled=!history.undo.length; $('#printRedo').disabled=!history.redo.length;};
+  const restore=(from,to)=>{if(!from.length || getTab(id)!==tab || mode==='viewing')return;to.push(snapshot());tab.printLayout=from.pop();save();refresh();};
+  $('#printUndo').addEventListener('click',()=>restore(history.undo,history.redo)); $('#printRedo').addEventListener('click',()=>restore(history.redo,history.undo)); refresh();
+  $('#mCancel').addEventListener('click',closeModal);
+  $('#mOk').addEventListener('click',()=>{
+    if (state.activeTabId !== id || getTab(id) !== tab || mode === 'viewing') { closeModal(); toast('Select the tab again', 'info'); return; }
+    const header = $('#printHeader').value.replace(/[\r\n\x00-\x1f]/g,' ').trim(), footer = $('#printFooter').value.replace(/[\r\n\x00-\x1f]/g,' ').trim(), headerPosition = $('#printHeaderPosition').value, footerPosition = $('#printFooterPosition').value, numberPosition = $('#printNumberPosition').value;
+    if (header.length > 150 || footer.length > 150 || !PRINT_BOXES.slice(0,3).includes(headerPosition) || !PRINT_BOXES.slice(3).includes(footerPosition) || (numberPosition !== 'none' && !PRINT_BOXES.includes(numberPosition))) { toast('Choose valid print settings', 'error'); return; }
+    history.undo.push(snapshot()); if(history.undo.length>50)history.undo.shift(); history.redo=[];
+    const target = getTab(id); target.printLayout = {...(target.printLayout && typeof target.printLayout === 'object' ? target.printLayout : {}),header,footer,headerPosition,footerPosition,numberPosition};
+    save(); closeModal(); toast('Print layout saved for this tab', 'check_circle');
+  });
+}
+function paginationCSS() {
+  const tab = getTab(state.activeTabId), layout = printLayoutValues(tab), {paper,orientation} = pageSetupValues();
+  const left = marginValue('left'), right = marginValue('right');
+  const boxes = Object.fromEntries(PRINT_BOXES.map(p=>[p,[]]));
+  // JSON string quoting protects the generated CSS from user text.
+  if (layout.header) boxes[layout.headerPosition].push(JSON.stringify(layout.header.replace(/[\x00-\x1f\x7f]/g,' ')));
+  if (layout.footer) boxes[layout.footerPosition].push(JSON.stringify(layout.footer.replace(/[\x00-\x1f\x7f]/g,' ')));
+  if (layout.numberPosition !== 'none') boxes[layout.numberPosition].push('"Page " counter(page) " of " counter(pages)');
+  const rules = PRINT_BOXES.filter(p=>boxes[p].length).map(p=>`@${p}{content:${boxes[p].join(' "  ·  " ')};font:9pt Arial,sans-serif;color:#333}`).join('');
+  const docStyles = $('#paragraphStyleRules').textContent.replace(/\.page/g,'.print-document');
+  return `@page{size:${PAPER_SIZES[paper][2]} ${orientation};margin:72px ${right}px 72px ${left}px;${rules}}
+@font-face{font-family:Roboto;src:url("${new URL('fonts/roboto-latin-400-normal.woff2',location.href).href}")}
+.print-document{font:11pt Arial,Helvetica,sans-serif;line-height:1.5;color:#000;overflow-wrap:break-word}
+.print-document h1{font-size:26pt;font-weight:700;margin:0 0 12px;line-height:1.25}.print-document h2{font-size:20pt;font-weight:700;margin:18px 0 8px;line-height:1.3}.print-document h3{font-size:15pt;font-weight:700;margin:14px 0 6px}.print-document h4{font-size:13pt;margin:12px 0 6px}.print-document h5{font-size:11pt;margin:10px 0 5px}.print-document h6{font-size:10pt;margin:10px 0 5px}
+.print-document p{margin:0 0 10px}.print-document ul,.print-document ol{margin:0 0 10px 28px;padding:0}.print-document li{margin-bottom:3px}.print-document blockquote{border-left:3px solid #4d5d85;margin:10px 0;padding:4px 0 4px 14px}.print-document pre{white-space:pre-wrap}.print-document a{color:#1155cc}.print-document img{max-width:100%;border-radius:6px;margin:8px 0}.print-document table{border-collapse:collapse;margin:10px 0;width:100%}.print-document th,.print-document td{border:1px solid #bdc1c6;padding:6px 10px;font-size:10.5pt;text-align:left}.print-document th{background:#f1f3f4}.print-document .checklist{list-style:none}.print-document .megadoc-page-break{break-before:page;page-break-before:always;border:0;height:0;margin:0}.print-document table.megadoc-toc td{border:0}.print-document .document-equation{display:inline-block}.print-footnote{float:footnote;font:10pt Arial,sans-serif;white-space:pre-wrap}.print-footnote::footnote-call{vertical-align:super;font-size:8pt}.print-footnote::footnote-marker{font-weight:bold}@footnote{border-top:1px solid #777;padding-top:6px}
+${docStyles}`;
+}
+let previewGeneration = 0;
+async function showPaginationPreview() {
+  if (!getTab(state.activeTabId)) { toast('Create a tab first', 'info'); return; }
+  if (!window.DOMPurify) { toast('Preview sanitizer is unavailable', 'error'); return; }
+  const setup = pageSetupValues(), dimensions = PAPER_SIZES[setup.paper], width = setup.orientation === 'landscape' ? dimensions[1] : dimensions[0];
+  if (marginValue('left') + marginValue('right') > width - 48) { toast('Page margins leave too little room to paginate', 'info'); return; }
+  saveCurrentContent(); save();
+  const html = DOMPurify.sanitize(page.innerHTML,{USE_PROFILES:{html:true,mathMl:true}}), snapshot = {html,css:paginationCSS()};
+  const overlay = $('#paginationPreview'), frame = $('#paginationFrame'), status = $('#paginationStatus'), print = $('#paginationPrint'), pdf = $('#paginationPdf');
+  const generation = ++previewGeneration; overlay.classList.remove('hidden'); status.textContent='Preparing pages…'; print.disabled=true; pdf.disabled=true;
+  try {
+    await new Promise((resolve,reject)=>{ const timer=setTimeout(()=>reject(new Error('Preview could not load')),15000); frame.onload=()=>{clearTimeout(timer);resolve()}; frame.onerror=()=>{clearTimeout(timer);reject(new Error('Preview could not load'))}; frame.src=`print-preview.html?view=${generation}`; });
+    if (generation !== previewGeneration) return;
+    const count = await Promise.race([frame.contentWindow.renderMegaDocPreview(snapshot), new Promise((_,reject)=>setTimeout(()=>reject(new Error('Pagination timed out')),30000))]);
+    if (generation !== previewGeneration) return;
+    status.textContent=`${count} page${count === 1 ? '' : 's'} · current tab`; print.disabled=false; pdf.disabled=false;
+  } catch (error) { if (generation === previewGeneration) status.textContent=`Could not paginate: ${error.message}. Your document was not changed.`; }
+}
+$('#paginationClose').addEventListener('click',()=>{ previewGeneration++; $('#paginationPreview').classList.add('hidden'); $('#paginationFrame').removeAttribute('src'); });
+$('#paginationPrint').addEventListener('click',()=>{ if (!$('#paginationPrint').disabled) $('#paginationFrame').contentWindow.print(); });
+$('#paginationPdf').addEventListener('click',async()=>{
+  if ($('#paginationPdf').disabled || !confirm('Download an image-based PDF? Text will not be selectable and some complex formatting, equations or cropped images may differ. For highest fidelity, use Print / Save as PDF instead.')) return;
+  const generation=previewGeneration, frame=$('#paginationFrame'), status=$('#paginationStatus'), button=$('#paginationPdf'), print=$('#paginationPrint'), name=getTab(state.activeTabId)?.title || 'MegaDoc tab';
+  button.disabled=true; print.disabled=true;
+  try { await frame.contentWindow.exportMegaDocPDF(name,(i,total)=>{if(generation === previewGeneration)status.textContent=`Creating PDF: page ${i} of ${total}…`;},()=>generation!==previewGeneration); if (generation===previewGeneration) status.textContent='PDF downloaded · current tab'; }
+  catch(error) { if(generation===previewGeneration) status.textContent=`PDF export failed: ${error.message}`; }
+  finally { if(generation===previewGeneration) {button.disabled=false;print.disabled=false;} }
+});
+
+function showPageSetup() {
+  const current = pageSetupValues();
+  openModal('Page setup', `<div class="field"><label for="paperSize">Paper size</label><select id="paperSize"><option value="letter">US Letter</option><option value="a4">A4</option><option value="legal">US Legal</option></select></div><div class="field"><label for="pageOrientation">Orientation</label><select id="pageOrientation"><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></div><p>Applies to all tabs. The editor displays one continuous page; paper size and orientation control printing. Printer settings may override these choices.</p>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Apply</button>`);
+  $('#paperSize').value = current.paper; $('#pageOrientation').value = current.orientation;
+  $('#mCancel').addEventListener('click', closeModal);
+  $('#mOk').addEventListener('click', () => {
+    const paper = $('#paperSize').value, orientation = $('#pageOrientation').value;
+    if (!Object.hasOwn(PAPER_SIZES, paper) || !['portrait','landscape'].includes(orientation)) return;
+    state.pageSetup = {...(state.pageSetup && typeof state.pageSetup === 'object' ? state.pageSetup : {}), paper, orientation};
+    closeModal(); applyPageSetup(); setZoom(state.zoom || 100); buildRuler(); save();
+  });
+}
+
 /* ─────────────────────────── Ruler ─────────────────────────── */
 // The ruler uses the rendered page, not the window, as its coordinate system.
 // Stored margins remain document-space pixels; narrow screens display a scaled
@@ -1616,6 +2799,7 @@ function pageGeometry() {
   return { rect, scale, borderLeft: parseFloat(style.borderLeftWidth) || 0, borderRight: parseFloat(style.borderRightWidth) || 0 };
 }
 function buildRuler() {
+  updatePrintPageSetup();
   const factor = marginDisplayScale();
   page.style.paddingLeft = (marginValue('left') * factor) + 'px';
   page.style.paddingRight = (marginValue('right') * factor) + 'px';
@@ -1771,6 +2955,8 @@ function wirePanel() {
     if (e.key === 'Escape') closeFind();
   });
   $('#findNext').addEventListener('click', () => findStep(1));
+  $('#findCase').addEventListener('change', runFind); $('#findRegex').addEventListener('change', runFind);
+  $('#replaceOne').addEventListener('click', () => replaceFind(false)); $('#replaceAll').addEventListener('click', () => replaceFind(true));
   $('#findPrev').addEventListener('click', () => findStep(-1));
   $('#findClose').addEventListener('click', closeFind);
   $('#importFile').addEventListener('change', e => {
@@ -1780,10 +2966,10 @@ function wirePanel() {
       try {
         const imported = JSON.parse(text);
         if (!imported.tabs || !imported.roots) throw new Error('bad file');
-        state = normalizeState(imported);
+        state = normalizeState(imported); paragraphStyleUndo = []; paragraphStyleRedo = []; applyParagraphStyles();
         $('#docTitle').value = state.docTitle;
         updateAvatar(); applyPageTheme();
-        save(true); loadTabContent(); renderTree(); setZoom(state.zoom || 100);
+        save(true); applyPageSetup(); loadTabContent(); renderTree(); setZoom(state.zoom || 100);
         toast('MegaDoc imported', 'upload');
       } catch { toast('Could not import that file', 'error'); }
     });
@@ -1794,10 +2980,20 @@ function wirePanel() {
 function wireKeyboard() {
   document.addEventListener('keydown', e => {
     const mod = e.ctrlKey || e.metaKey;
+    if (mod && document.activeElement === page && getTab(state.activeTabId) && mode !== 'viewing') {
+      if (!e.altKey && !e.shiftKey && (e.key === '.' || e.key === ',')) { e.preventDefault(); exec(e.key === '.' ? 'superscript' : 'subscript'); return; }
+      if (e.altKey && !e.shiftKey && /^[0-6]$/.test(e.key)) { e.preventDefault(); setStyle(e.key === '0' ? 'p' : 'h' + e.key); return; }
+      if (e.altKey && e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); navigateHeading(e.key === 'ArrowUp' ? -1 : 1); return; }
+      if (!e.altKey && e.shiftKey) {
+        const alignments = { KeyL: 'justifyLeft', KeyE: 'justifyCenter', KeyR: 'justifyRight', KeyJ: 'justifyFull', Digit7: 'insertOrderedList', Digit8: 'insertUnorderedList' };
+        if (alignments[e.code]) { e.preventDefault(); exec(alignments[e.code]); return; }
+      }
+    }
     if (mod && e.key === '/') { e.preventDefault(); commandPalette(); }
     if (mod && e.altKey && e.key.toLowerCase() === 'n') { e.preventDefault(); addTab(state.activeTabId); }
     if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveCurrentContent(); save(true); toast('Saved', 'cloud_done'); }
-    if (mod && e.key.toLowerCase() === 'f') { e.preventDefault(); findInTab(); }
+    if (mod && (e.key.toLowerCase() === 'f' || (!e.shiftKey && e.key.toLowerCase() === 'h'))) { e.preventDefault(); findInTab(); }
+    if (mod && e.key.toLowerCase() === 'p') { e.preventDefault(); showPaginationPreview(); return; }
     if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); linkModal(); }
     if (e.key === 'Escape') { closeModal(); closeFind(); clearImageSelection(); }
   });
@@ -1810,6 +3006,8 @@ function init() {
   updateAvatar();
   applyPageTheme();
   applyAppearance();
+  applyPageSetup();
+  applyParagraphStyles();
   buildMenubar();
   buildPalettes();
   wireToolbar();
@@ -1831,6 +3029,8 @@ function init() {
     rulerObserver.observe($('#editorArea'));
     rulerObserver.observe($('#ruler'));
     rulerObserver.observe($('#pageWrap'));
+    const zoomObserver = new ResizeObserver(() => { $('#pageWrap').style.marginBottom = `${((state.zoom || 100) / 100 - 1) * page.offsetHeight}px`; });
+    zoomObserver.observe(page);
   }
   dragMarker($('#markerLeft'), 'left');
   dragMarker($('#markerRight'), 'right');

@@ -4,9 +4,11 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>MegaDoc — All your notes in one document</title>
+<style id="printPageSetup"></style>
 <meta name="description" content="MegaDoc is a software for putting all your notes in one document when you are too lazy to manage 15 billion of them." />
 <link rel="icon" type="image/svg+xml" href="assets/megadoc.svg" />
-<link rel="stylesheet" href="css/style.css?v=9" />
+<link rel="stylesheet" href="css/style.css?v=14" />
+<style id="paragraphStyleRules"></style>
 </head>
 <body>
 
@@ -112,6 +114,8 @@
     <button class="tb-btn fmt" data-cmd="italic" aria-pressed="false" title="Italic (Ctrl+I)"><i>I</i></button>
     <button class="tb-btn fmt" data-cmd="underline" aria-pressed="false" title="Underline (Ctrl+U)"><u>U</u></button>
     <button class="tb-btn fmt" data-cmd="strike" aria-pressed="false" title="Strikethrough"><s>S</s></button>
+    <button class="tb-btn fmt" data-cmd="superscript" aria-pressed="false" title="Superscript (Ctrl+.)" aria-label="Superscript">x<sup>2</sup></button>
+    <button class="tb-btn fmt" data-cmd="subscript" aria-pressed="false" title="Subscript (Ctrl+,)" aria-label="Subscript">x<sub>2</sub></button>
 
     <div class="tb-dropdown" data-dropdown="color">
       <button class="tb-btn fmt color-btn" id="colorBtn" title="Text color"><span class="color-letter">A</span><span class="color-bar" id="colorBar"></span></button>
@@ -198,12 +202,15 @@
     <button class="toolbar-restore" id="toolbarRestore"><span class="material-symbols-outlined">keyboard_arrow_down</span> Show toolbar</button>
     <div class="mode-banner" id="modeBanner"><span class="material-symbols-outlined">rate_review</span><span>Suggesting mode — edits are made directly; review and approval are not available</span></div>
     <div class="findbar" id="findbar">
-      <span class="material-symbols-outlined" style="color:var(--ink-3)">search</span>
-      <input id="findInput" placeholder="Find in tab…" aria-label="Find in tab" />
-      <span class="find-count" id="findCount"></span>
-      <button class="icon-btn" id="findPrev" title="Previous (Shift+Enter)"><span class="material-symbols-outlined">keyboard_arrow_up</span></button>
-      <button class="icon-btn" id="findNext" title="Next (Enter)"><span class="material-symbols-outlined">keyboard_arrow_down</span></button>
-      <button class="icon-btn" id="findClose" title="Close (Esc)"><span class="material-symbols-outlined">close</span></button>
+      <div class="find-row"><span class="material-symbols-outlined" style="color:var(--ink-3)">search</span>
+        <input id="findInput" placeholder="Find in tab…" aria-label="Find in tab" />
+        <span class="find-count" id="findCount" aria-live="polite"></span>
+        <button class="icon-btn" id="findPrev" title="Previous (Shift+Enter)" aria-label="Previous match"><span class="material-symbols-outlined">keyboard_arrow_up</span></button>
+        <button class="icon-btn" id="findNext" title="Next (Enter)" aria-label="Next match"><span class="material-symbols-outlined">keyboard_arrow_down</span></button>
+        <button class="icon-btn" id="findClose" title="Close (Esc)" aria-label="Close find"><span class="material-symbols-outlined">close</span></button>
+      </div>
+      <div class="find-row"><input id="replaceInput" placeholder="Replace with…" aria-label="Replace with" /><button class="btn text" id="replaceOne">Replace</button><button class="btn text" id="replaceAll">Replace all</button></div>
+      <div class="find-options"><label><input type="checkbox" id="findCase"> Match case</label><label><input type="checkbox" id="findRegex"> Regular expression</label></div>
     </div>
     <div class="crumbbar" id="crumbbar">
       <button class="panel-reopen" id="panelReopen" aria-label="Show tabs" aria-controls="tabsPanel" aria-expanded="false"><span class="material-symbols-outlined">view_sidebar</span><span>Tabs</span></button>
@@ -218,6 +225,7 @@
       <div class="scroll-fade" aria-hidden="true"></div>
       <div class="page-wrap" id="pageWrap">
         <div class="page" id="page" contenteditable="true" spellcheck="true" role="textbox" aria-label="Document editor"></div>
+        <section id="footnotesPrint" class="footnotes-print" aria-label="Footnotes"></section>
       </div>
     </div>
   </main>
@@ -237,8 +245,17 @@
 
 <!-- Image controls live outside the editable content and are never saved in the document. -->
 <div id="imageControls" class="image-controls hidden" role="group" aria-label="Selected image controls">
+  <button type="button" id="imageAdjust" class="image-adjust" aria-label="Crop, rotate or add image border" title="Crop, rotate or add image border"><span class="material-symbols-outlined">tune</span></button>
+  <button type="button" id="imageLayoutButton" class="image-layout" aria-label="Image text layout" title="Image text layout"><span class="material-symbols-outlined">wrap_text</span></button>
+  <button type="button" id="imageAlt" class="image-alt" aria-label="Edit image alt text" title="Edit image alt text"><span class="material-symbols-outlined">image</span></button>
   <button type="button" id="imageDelete" class="image-delete" aria-label="Delete selected image" title="Delete image"><span class="material-symbols-outlined">delete</span></button>
   <button type="button" id="imageResize" class="image-resize" aria-label="Resize image; use left and right arrow keys" title="Drag to resize; use arrow keys for fine adjustments"></button>
+</div>
+
+<!-- Paginated output is a read-only snapshot, never the editable document. -->
+<div id="paginationPreview" class="pagination-preview hidden" role="dialog" aria-modal="true" aria-label="Paginated preview">
+  <div class="pagination-toolbar"><strong>Paginated preview</strong><span id="paginationStatus" role="status">Preparing pages…</span><button class="btn text" id="paginationClose">Back to editor</button><button class="btn text" id="paginationPdf" disabled>Download PDF…</button><button class="btn primary" id="paginationPrint" disabled>Print / Save as PDF</button></div>
+  <iframe id="paginationFrame" title="Paginated document preview"></iframe>
 </div>
 
 <!-- ══════════ CONTEXT MENU / MENUS / MODALS / TOASTS ══════════ -->
@@ -249,7 +266,10 @@
 </div>
 <div class="toast-wrap" id="toastWrap"></div>
 <input type="file" id="importFile" accept=".json,application/json" hidden />
+<input type="file" id="localContentFile" accept=".txt,.html,.htm,.docx,.odt,text/plain,text/html,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.oasis.opendocument.text" hidden />
 
-<script type="module" src="js/app.js?v=9"></script>
+<script defer src="vendor/katex/katex.min.js"></script>
+<script defer src="vendor/dompurify/purify.min.js"></script>
+<script type="module" src="js/app.js?v=14"></script>
 </body>
 </html>
