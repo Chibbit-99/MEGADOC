@@ -1544,6 +1544,95 @@ function openMenu(i, anchor) {
   dd.querySelectorAll('.mi').forEach(b => b.addEventListener('click', () => { closeMenus(); menu.items[+b.dataset.i].fn(); }));
 }
 
+/* Suggestions use local English dictionaries because browser spellcheck does
+   not expose its native suggestions to a custom context menu. */
+let spellWorker = null, spellSequence = 0;
+const spellPending = new Map();
+function stopSpellWorker(message) {
+  spellWorker?.terminate(); spellWorker = null;
+  for (const request of spellPending.values()) { clearTimeout(request.timer); request.reject(new Error(message)); }
+  spellPending.clear();
+}
+function spellingSuggestions(word) {
+  return new Promise((resolve, reject) => {
+    if (!spellWorker) {
+      try { spellWorker = new Worker('js/spell-worker.js'); }
+      catch { reject(new Error('Spelling worker unavailable')); return; }
+      spellWorker.onmessage = ({data}) => {
+        const pending = spellPending.get(data?.id); if (!pending) return;
+        clearTimeout(pending.timer); spellPending.delete(data.id);
+        if (data.error) pending.reject(new Error(data.error)); else pending.resolve(data);
+      };
+      spellWorker.onerror = event => { event?.preventDefault(); stopSpellWorker('Spelling worker unavailable'); };
+    }
+    const id = ++spellSequence;
+    const timer = setTimeout(() => stopSpellWorker('Spelling suggestions timed out'), 12000);
+    spellPending.set(id, {resolve,reject,timer});
+    try { spellWorker.postMessage({id,word}); } catch { stopSpellWorker('Spelling worker unavailable'); }
+  });
+}
+function wordAtContextPoint(event) {
+  if (!page.spellcheck || event.target.closest('[spellcheck="false"],pre,code,[contenteditable="false"],a[data-megadoc-footnote],a[data-megadoc-bookmark]')) return null;
+  let node, offset;
+  if (event.clientX || event.clientY) {
+    const point = document.caretPositionFromPoint?.(event.clientX,event.clientY);
+    if (point) { node=point.offsetNode; offset=point.offset; }
+    else { const range=document.caretRangeFromPoint?.(event.clientX,event.clientY); node=range?.startContainer; offset=range?.startOffset; }
+  } else {
+    const selection=getSelection();
+    if (selection.rangeCount && selection.isCollapsed) { node=selection.anchorNode; offset=selection.anchorOffset; }
+  }
+  if (node?.nodeType !== Node.TEXT_NODE || !page.contains(node) || node.parentElement?.closest('[spellcheck="false"],pre,code,[contenteditable="false"],a[data-megadoc-footnote],a[data-megadoc-bookmark]')) return null;
+  const source = node.data;
+  for (const match of source.matchAll(/[A-Za-z]+(?:['’][A-Za-z]+)*/g)) {
+    const start = match.index, end = start + match[0].length;
+    if (offset < start || offset > end || end-start < 2 || end-start > 32) continue;
+    // Do not offer a correction for part of a Unicode or cross-format word.
+    const block=node.parentElement.closest('p,div,h1,h2,h3,h4,h5,h6,li,td,th,blockquote') || page;
+    let before=source[start-1] || '', after=source[end] || '';
+    if (!before && start===0) { const r=document.createRange(); r.selectNodeContents(block); r.setEnd(node,0); before=r.toString().slice(-1); }
+    if (!after && end===source.length) { const r=document.createRange(); r.selectNodeContents(block); r.setStart(node,source.length); after=r.toString().slice(0,1); }
+    if (/[\p{L}\p{M}'’]/u.test(before) || /[\p{L}\p{M}'’]/u.test(after)) continue;
+    const range = document.createRange(); range.setStart(node,start); range.setEnd(node,end);
+    if ((event.clientX || event.clientY) && ![...range.getClientRects()].some(r=>event.clientX >= r.left-1 && event.clientX <= r.right+1 && event.clientY >= r.top-1 && event.clientY <= r.bottom+1)) continue;
+    return {node,source,start,end,word:match[0],tab:getTab(state.activeTabId),tabId:state.activeTabId};
+  }
+  return null;
+}
+function spellingTargetValid(target) {
+  return page.spellcheck && mode !== 'viewing' && getTab(target.tabId) === target.tab && state.activeTabId === target.tabId && page.contains(target.node) && target.node.data === target.source && !target.node.parentElement?.closest('[spellcheck="false"],pre,code,[contenteditable="false"],a[data-megadoc-footnote],a[data-megadoc-bookmark]');
+}
+function addSpellingSection(menu, target, reposition) {
+  if (!target) return;
+  const section=document.createElement('div'); section.className='spelling-section';
+  const heading=document.createElement('div'); heading.className='mi-label'; heading.textContent='Spelling · English (US/AU)';
+  const status=document.createElement('div'); status.className='mi-label spelling-status'; status.setAttribute('role','status'); status.textContent='Checking spelling…';
+  const separator=document.createElement('div'); separator.className='mi-sep';
+  section.append(heading,status,separator); menu.prepend(section); reposition();
+  spellingSuggestions(target.word).then(result => {
+    if (!section.isConnected || menu.classList.contains('hidden')) return;
+    if (!spellingTargetValid(target)) { section.remove(); reposition(); return; }
+    if (result.correct) { section.remove(); reposition(); return; }
+    status.remove();
+    if (!result.suggestions?.length) { status.textContent='No suggestions'; section.insertBefore(status,separator); }
+    else for (const suggestion of result.suggestions) {
+      const button=document.createElement('button'); button.type='button'; button.className='mi spelling-suggestion'; button.textContent=suggestion;
+      button.addEventListener('click',()=>{
+        closeMenus();
+        if (!spellingTargetValid(target)) { toast('Text changed; right-click the word again', 'info'); return; }
+        const range=document.createRange(); range.setStart(target.node,target.start); range.setEnd(target.node,target.end);
+        page.focus(); const selection=getSelection(); selection.removeAllRanges(); selection.addRange(range); editorRange=range.cloneRange();
+        exec('insertText',suggestion);
+      });
+      section.insertBefore(button,separator);
+    }
+    reposition();
+  }).catch(() => {
+    if (!section.isConnected || menu.classList.contains('hidden')) return;
+    status.textContent='Suggestions unavailable'; reposition();
+  });
+}
+
 /* Editor context menu: native browser menus remain available outside the page. */
 function hasHeaderRow(table) {
   const first = table?.rows[0];
@@ -1556,6 +1645,7 @@ function showEditorContext(e) {
   if (selection.rangeCount && page.contains(selection.anchorNode) && page.contains(selection.focusNode)) editorRange = selection.getRangeAt(0).cloneRange();
   const cell = e.target.closest('td,th');
   const table = cell?.closest('table');
+  const spellingTarget = wordAtContextPoint(e);
   closeMenus();
   const menu = $('#contextMenu');
   menu.innerHTML = (table && page.contains(table) ? `
@@ -1585,9 +1675,8 @@ function showEditorContext(e) {
     <button class="mi" data-editor-action="paste"><span class="material-symbols-outlined">content_paste</span> Paste</button>
     <button class="mi" data-editor-action="select-all"><span class="material-symbols-outlined">select_all</span> Select all</button>`;
   menu.classList.remove('hidden');
-  const rect = menu.getBoundingClientRect();
-  menu.style.left = Math.max(8, Math.min(e.clientX, innerWidth - rect.width - 8)) + 'px';
-  menu.style.top = Math.max(8, Math.min(e.clientY, innerHeight - rect.height - 8)) + 'px';
+  const reposition = () => { const rect = menu.getBoundingClientRect(); menu.style.left = Math.max(8, Math.min(e.clientX, innerWidth - rect.width - 8)) + 'px'; menu.style.top = Math.max(8, Math.min(e.clientY, innerHeight - rect.height - 8)) + 'px'; };
+  reposition(); addSpellingSection(menu, spellingTarget, reposition);
   menu.querySelectorAll('[data-editor-action]').forEach(button => button.addEventListener('click', () => {
     const action = button.dataset.editorAction;
     closeMenus();
