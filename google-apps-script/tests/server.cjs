@@ -4,10 +4,10 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
 const path = require('node:path');
-let driveFailure=false, driveArgs;
+let driveFailure=false, driveArgs, drivePages=null, driveCalls=[];
 let revision = 'r1', documentOverrides = {}, calls = [], cache = new Map(), createFailure = false, updateFailure = false, template, allowedOrigins = '["https://megadoc.example"]';
 const base = () => ({title:'Existing', revisionId:revision, suggestionsViewMode:'SUGGESTIONS_INLINE', commentsViewMode:'COMMENTS_VIEW_MODE_INCLUDED', tabs:[{tabProperties:{tabId:'t.0'}, documentTab:{body:{content:[{sectionBreak:{},startIndex:0,endIndex:1},{paragraph:{elements:[{textRun:{content:'old\n'}}]},startIndex:1,endIndex:5}]}}}]});
-const ctx = {Drive:{Files:{list(options){driveArgs=options; if(driveFailure) throw Error('denied'); return {files:[{id:'recent123456789',name:'Recent',capabilities:{canEdit:true}},{id:'readonly123456789',name:'Read only',capabilities:{canEdit:false}},{id:'bad!',name:'Invalid',capabilities:{canEdit:true}}]};}}},Docs:{Documents:{
+const ctx = {Drive:{Files:{list(options){driveArgs=options; driveCalls.push(options); if(driveFailure) throw Error('denied'); if(drivePages) return drivePages(options); return {files:[{id:'recent123456789',name:'Recent',capabilities:{canEdit:true}},{id:'readonly123456789',name:'Read only',capabilities:{canEdit:false}},{id:'bad!',name:'Invalid',capabilities:{canEdit:true}}]};}}},Docs:{Documents:{
   get(id,options) { calls.push({method:'get',id,options}); return {...base(),...documentOverrides}; },
   create(data) { calls.push({method:'create',data}); if (createFailure) throw Error('network'); return {documentId:'doc123456789'}; },
   batchUpdate(body,id) { calls.push({method:'batchUpdate',body,id}); if (updateFailure) throw Error('network'); }
@@ -32,7 +32,12 @@ allowedOrigins='["https://good.example", "*", "https://evil.example/path", "http
 exec('doGet',{}); assert.equal(JSON.stringify(JSON.parse(template.boot).allowedOrigins),JSON.stringify(['https://good.example','http://localhost:8000']));
 allowedOrigins='not-json'; exec('doGet',{}); assert.equal(JSON.parse(template.boot).allowedOrigins.length,0);
 allowedOrigins=null; exec('doGet',{}); assert.equal(JSON.parse(template.boot).allowedOrigins[0],'https://chibbit-99.github.io');
-let recent=exec('listRecentDocuments'); assert.equal(recent.length,1); assert.equal(recent[0].id,'recent123456789'); assert.equal(driveArgs.orderBy,'viewedByMeTime desc'); assert.match(driveArgs.q,/application\/vnd\.google-apps\.document/); driveFailure=true; rejects(()=>exec('listRecentDocuments'),/Drive authorization/); driveFailure=false;
+let recent=exec('listRecentDocuments'); assert.equal(recent.files.length,1); assert.equal(recent.files[0].id,'recent123456789'); assert.equal(driveArgs.orderBy,'recency desc'); assert.equal(driveArgs.corpora,'allDrives'); assert.equal(driveArgs.includeItemsFromAllDrives,true); assert.equal(driveArgs.supportsAllDrives,true); assert.match(driveArgs.q,/application\/vnd\.google-apps\.document/);
+driveCalls=[]; drivePages=options=> options.pageToken ? {incompleteSearch:true,files:[{id:'shared123456789',name:'Shared',capabilities:{canEdit:true}},{id:'unknown123456789',name:'Unknown'},{id:'recent123456789',name:'duplicate',capabilities:{canEdit:true}}]} : {nextPageToken:'page2',files:[{id:'recent123456789',name:'Recent',capabilities:{canEdit:true}},{id:'readonly123456789',name:'readonly',capabilities:{canEdit:false}}]};
+recent=exec('listRecentDocuments',"O'Reilly\\work"); assert.equal(recent.files.length,3); assert.equal(recent.files[1].id,'shared123456789'); assert.equal(recent.files[2].canEdit,false); assert.equal(recent.incomplete,true); assert.equal(driveCalls.length,2); assert.equal(driveCalls[1].pageToken,'page2'); assert.ok(driveCalls[0].q.includes("O\\'Reilly\\\\work"));
+driveCalls=[]; drivePages=options=>({nextPageToken:'page'+driveCalls.length,files:[]}); recent=exec('listRecentDocuments'); assert.equal(driveCalls.length,10); assert.equal(recent.more,true);
+drivePages=()=>({nextPageToken:'same',files:[]}); rejects(()=>exec('listRecentDocuments'),/Could not load/);
+drivePages=null; rejects(()=>exec('listRecentDocuments','x'.repeat(101)),/Search/); driveFailure=true; rejects(()=>exec('listRecentDocuments'),/Drive advanced service/); driveFailure=false;
 allowedOrigins='["https://megadoc.example"]';
 rejects(()=>exec('validatePayload_', {...payload,blocks:[{kind:'NORMAL_TEXT',runs:[{text:'x'.repeat(100001)}]}]}),/large/);
 assert.equal(exec('validatePayload_', {...payload,blocks:[{kind:'NORMAL_TEXT',runs:[{text:'x'.repeat(10000)}]}]}).blocks[0].runs[0].text.length,10000);
@@ -82,9 +87,19 @@ rejects(()=>exec('overwriteDocument',prep.ticket,'Existing',payload),/expired/);
 prep=exec('prepareOverwrite',id,payload); revision='r2';
 rejects(()=>exec('overwriteDocument',prep.ticket,'Existing',payload),/changed/); revision='r1';
 prep=exec('prepareOverwrite',id,payload);
-rejects(()=>exec('overwriteDocument',prep.ticket,'wrong',payload),/confirmation/);
+rejects(()=>exec('overwriteDocument',prep.ticket,'wrong',payload),/title did not match/);
 prep=exec('prepareOverwrite',id,payload);
 rejects(()=>exec('overwriteDocument',prep.ticket,'Existing',{...payload,title:'Changed'}),/content changed/);
+// Simulate different object key ordering between two google.script.run calls.
+const reorderedInput={title:'Rich',version:1,blocks:richInput.blocks.map(b=>({runs:b.runs.map(r=>({style:r.style && Object.fromEntries(Object.entries(r.style).reverse()),text:r.text})),list:b.list && {level:b.list.level,type:b.list.type},paragraph:b.paragraph && Object.fromEntries(Object.entries(b.paragraph).reverse()),kind:b.kind}))};
+prep=exec('prepareOverwrite',id,richInput);
+assert.equal(exec('overwriteDocument',prep.ticket,'Existing',reorderedInput).ok,true);
+prep=exec('prepareOverwrite',id,richInput);
+const changedStyle=JSON.parse(JSON.stringify(reorderedInput)); changedStyle.blocks[0].runs[0].style.bold=false;
+rejects(()=>exec('overwriteDocument',prep.ticket,'Existing',changedStyle),/export content changed/i);
+prep=exec('prepareOverwrite',id,richInput);
+const changedOrder=JSON.parse(JSON.stringify(reorderedInput)); changedOrder.blocks.reverse();
+rejects(()=>exec('overwriteDocument',prep.ticket,'Existing',changedOrder),/export content changed/i);
 for (const override of [{comments:[{commentId:'x'}]},{suggestions:[{suggestionId:'x'}]},{tabs:[...base().tabs,...base().tabs]},{commentsViewMode:'COMMENTS_VIEW_MODE_OMITTED'}, {suggestedDocumentStyleChanges:{s:{}}}, {tabs:[{...base().tabs[0],documentTab:{...base().tabs[0].documentTab,commentAnchors:{x:{}}}}]}]) {
   documentOverrides=override; rejects(()=>exec('prepareOverwrite',id,payload),/cannot be|Documents with/);
 }

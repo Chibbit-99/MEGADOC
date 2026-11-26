@@ -24,14 +24,15 @@
   <button id="create">Create new Google Doc</button>
   <h2>Replace an existing Google Doc</h2>
   <p class="note">Only simple, single-tab documents without comments, suggestions, lists or special objects are eligible. The existing text and formatting will be replaced; document metadata may remain.</p>
-  <button id="loadRecent" type="button">Load recent Google Docs</button>
-  <label for="recent">Recent editable Google Docs</label><select id="recent" disabled><option value="">Load recent documents or enter a URL below</option></select>
-  <p class="note">Listing recent documents requires permission to view files in Google Drive. This list shows up to 20 recently viewed editable Google Docs; it may not include every document.</p>
+  <label for="searchDocs">Find by beginning of document name (optional)</label><input id="searchDocs" maxlength="100" autocomplete="off" placeholder="Leave blank for recent documents">
+  <button id="loadRecent" type="button">Load or search Google Docs</button>
+  <label for="recent">Google Docs found</label><select id="recent" disabled><option value="">Load recent documents or enter a URL below</option></select>
+  <p class="note">Listing recent documents requires permission to view files in Google Drive. Shows up to 20 recent matching documents from your accessible Drive and shared drives. Some results may be missing; search by the beginning of its name or paste a document URL. Edit access is checked when you inspect.</p>
   <label for="document">Google Doc URL or ID</label><input id="document" autocomplete="off">
   <button id="inspect">Inspect document for overwrite</button>
   <section id="confirm" hidden>
     <strong>Overwrite confirmation</strong>
-    <p id="target"></p><p>Type the exact current document title below, then confirm. This replaces the existing text.</p>
+    <p id="target"></p><p>Type the exact title of the existing Google Doc shown above (not the MegaDoc tab title), then confirm. This replaces the existing text.</p>
     <label for="confirmation">Current document title</label><input id="confirmation" autocomplete="off">
     <button id="overwrite">Replace document text</button><button id="cancel">Cancel</button>
   </section>
@@ -108,7 +109,7 @@
       }
       const status = text => { $('status').textContent = text; };
       function clearConfirmation() { ticket = pending = null; $('confirm').hidden = true; $('confirmation').value = ''; }
-      function setBusy(value) { busy = value; for (const id of ['create','inspect','overwrite','cancel','mode','title','content','document','confirmation','loadRecent','recent']) $(id).disabled = value; }
+      function setBusy(value) { busy = value; for (const id of ['create','inspect','overwrite','cancel','mode','title','content','document','confirmation','loadRecent','recent','searchDocs']) $(id).disabled = value; }
       function payload() {
         if ($('mode').value === 'json') return JSON.parse($('content').value);
         const text = $('content').value.replace(/\r\n?/g, '\n');
@@ -124,13 +125,19 @@
       for (const id of ['mode','title','content','document']) $(id).addEventListener('input', () => { touched = true; if (!busy) clearConfirmation(); });
       $('recent').addEventListener('change', () => { if ($('recent').value) { $('document').value = $('recent').value; touched = true; clearConfirmation(); } });
       $('loadRecent').addEventListener('click', () => {
-        clearConfirmation(); setBusy(true); status('Loading recent Google Docs…');
-        google.script.run.withSuccessHandler(files => {
-          setBusy(false); const select = $('recent'); select.replaceChildren();
-          const placeholder = document.createElement('option'); placeholder.value=''; placeholder.textContent = files.length ? 'Choose a recent document' : 'No editable recent documents found'; select.appendChild(placeholder);
-          for (const file of files) { if (!file || !/^[A-Za-z0-9_-]{10,200}$/.test(file.id || '') || typeof file.title !== 'string') continue; const option=document.createElement('option'); option.value=file.id; option.textContent=file.title; select.appendChild(option); }
-          status(files.length ? 'Select a recent document, then inspect it.' : 'No editable recent documents found; enter a URL or ID.');
-        }).withFailureHandler(error => { setBusy(false); status(error && error.message ? error.message : 'Could not load recent Google Docs. Enter a URL or ID.'); }).listRecentDocuments();
+        clearConfirmation(); setBusy(true); status('Loading Google Docs…');
+        const select=$('recent'); select.replaceChildren();
+        const placeholder=document.createElement('option'); placeholder.value=''; placeholder.textContent='Loading…'; select.appendChild(placeholder);
+        google.script.run.withSuccessHandler(result => {
+          setBusy(false); select.replaceChildren();
+          const files=result && Array.isArray(result.files) ? result.files : [];
+          const placeholder = document.createElement('option'); placeholder.value=''; placeholder.textContent = files.length ? 'Choose a document' : 'No matching documents found'; select.appendChild(placeholder);
+          for (const file of files) { if (!file || !/^[A-Za-z0-9_-]{10,200}$/.test(file.id || '') || typeof file.title !== 'string') continue; const option=document.createElement('option'); option.value=file.id; option.textContent=file.title + (file.canEdit === false ? ' (edit access unconfirmed)' : ''); select.appendChild(option); }
+          let message=files.length ? 'Select a document, then inspect it.' : 'No matching documents found. Try the beginning of its name, another account, or enter a URL or ID.';
+          if (result && result.more) message += ' More documents may exist; search by the beginning of its name to narrow the results.';
+          if (result && result.incomplete) message += ' Google reported an incomplete Drive search; some shared-drive documents may be missing.';
+          status(message);
+        }).withFailureHandler(error => { setBusy(false); select.replaceChildren(); const option=document.createElement('option'); option.value=''; option.textContent='Could not load documents'; select.appendChild(option); status(error && error.message ? error.message : 'Could not load Google Docs. Enter a URL or ID.'); }).listRecentDocuments($('searchDocs').value);
       });
       $('cancel').addEventListener('click', clearConfirmation);
       $('create').addEventListener('click', () => {

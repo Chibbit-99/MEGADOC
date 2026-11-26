@@ -1548,6 +1548,30 @@ function openMenu(i, anchor) {
 
 /* Suggestions use local English dictionaries because browser spellcheck does
    not expose its native suggestions to a custom context menu. */
+// This dictionary belongs to MegaDoc on this browser/origin, not the browser's
+// separate native spelling dictionary. Read each time so other tabs are seen.
+const PERSONAL_DICTIONARY_KEY = 'megadoc-personal-dictionary-v1';
+const PERSONAL_DICTIONARY_LIMIT = 5000;
+function personalWordKey(word) { return word.replace(/’/g, "'").toLowerCase(); }
+function personalDictionary() {
+  let raw;
+  try { raw = localStorage.getItem(PERSONAL_DICTIONARY_KEY); }
+  catch (_) { throw new Error('Browser storage is unavailable.'); }
+  if (raw === null) return new Set();
+  let words;
+  try { if (raw.length > 200000) throw new Error(); words=JSON.parse(raw); }
+  catch (_) { throw new Error('Personal dictionary could not be read.'); }
+  if (!Array.isArray(words) || words.length > PERSONAL_DICTIONARY_LIMIT || words.some(word => typeof word !== 'string' || word.length < 2 || word.length > 32 || !/^[A-Za-z]+(?:['’][A-Za-z]+)*$/.test(word))) throw new Error('Personal dictionary could not be read.');
+  return new Set(words.map(personalWordKey));
+}
+function savePersonalWord(word, add) {
+  const words=personalDictionary(), key=personalWordKey(word);
+  if (add && !words.has(key) && words.size >= PERSONAL_DICTIONARY_LIMIT) throw new Error('Personal dictionary is full.');
+  if (add) words.add(key); else words.delete(key);
+  try { localStorage.setItem(PERSONAL_DICTIONARY_KEY,JSON.stringify([...words].sort())); }
+  catch (_) { throw new Error('Could not save the personal dictionary in browser storage.'); }
+}
+function isPersonalWord(word) { try { return personalDictionary().has(personalWordKey(word)); } catch (_) { return false; } }
 let spellWorker = null, spellSequence = 0;
 const spellPending = new Map();
 function stopSpellWorker(message) {
@@ -1556,6 +1580,7 @@ function stopSpellWorker(message) {
   spellPending.clear();
 }
 function spellingSuggestions(word) {
+  if (isPersonalWord(word)) return Promise.resolve({correct:true,personal:true});
   return new Promise((resolve, reject) => {
     if (!spellWorker) {
       try { spellWorker = new Worker('js/spell-worker.js'); }
@@ -1611,10 +1636,31 @@ function addSpellingSection(menu, target, reposition) {
   const status=document.createElement('div'); status.className='mi-label spelling-status'; status.setAttribute('role','status'); status.textContent='Checking spelling…';
   const separator=document.createElement('div'); separator.className='mi-sep';
   section.append(heading,status,separator); menu.prepend(section); reposition();
+  function dictionaryAction(saved) {
+    const button=document.createElement('button'); button.type='button'; button.className='mi spelling-dictionary-action';
+    button.textContent=saved ? 'Remove from personal dictionary' : 'Add to personal dictionary';
+    button.addEventListener('click',()=>{
+      closeMenus();
+      if (!spellingTargetValid(target)) { toast('Text changed; right-click the word again', 'info'); return; }
+      try {
+        savePersonalWord(target.word,!saved);
+        toast(saved ? 'Removed from MegaDoc personal dictionary' : 'Added to MegaDoc dictionary; browser underlines may remain', 'spellcheck');
+      } catch (error) { toast(error.message, 'error'); }
+    });
+    section.insertBefore(button,separator);
+  }
   spellingSuggestions(target.word).then(result => {
     if (!section.isConnected || menu.classList.contains('hidden')) return;
     if (!spellingTargetValid(target)) { section.remove(); reposition(); return; }
-    if (result.correct) { section.remove(); reposition(); return; }
+    // A different MegaDoc tab may have changed the personal dictionary while
+    // the asynchronous worker was checking this word.
+    if (isPersonalWord(target.word)) {
+      status.textContent='In your personal dictionary'; dictionaryAction(true); reposition(); return;
+    }
+    // If a saved word was removed while this check was in flight, check it
+    // again next time instead of treating the stale response as authoritative.
+    if (result.personal) { section.remove(); reposition(); return; }
+    if (result.correct) { status.textContent='Recognized by MegaDoc dictionaries'; dictionaryAction(false); reposition(); return; }
     status.remove();
     if (!result.suggestions?.length) { status.textContent='No suggestions'; section.insertBefore(status,separator); }
     else for (const suggestion of result.suggestions) {
@@ -1628,10 +1674,13 @@ function addSpellingSection(menu, target, reposition) {
       });
       section.insertBefore(button,separator);
     }
-    reposition();
+    dictionaryAction(false); reposition();
   }).catch(() => {
     if (!section.isConnected || menu.classList.contains('hidden')) return;
-    status.textContent='Suggestions unavailable'; reposition();
+    if (!spellingTargetValid(target)) { section.remove(); reposition(); return; }
+    if (isPersonalWord(target.word)) { status.textContent='In your personal dictionary'; dictionaryAction(true); }
+    else { status.textContent='Suggestions unavailable'; dictionaryAction(false); }
+    reposition();
   });
 }
 

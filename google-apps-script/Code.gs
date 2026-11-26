@@ -131,13 +131,42 @@ function requestsForPayload_(payload, tabId, startIndex, useExistingNewline) {
   return requests;
 }
 
-// Recent Google Docs visible to this user; listing alone never modifies files.
-function listRecentDocuments() {
-  let response;
+// List a bounded set of recent, non-trashed Docs. Paging matters: Drive may
+// return short pages, and read-only files can fill the first page. A name
+// filter lets users find older documents without enumerating their whole Drive.
+function listRecentDocuments(query) {
+  if (query === undefined || query === null) query = '';
+  if (typeof query !== 'string' || query.length > 100 || /[\x00-\x1f\x7f-\x9f]/.test(query)) throw new Error('Search must be at most 100 characters without control characters.');
+  query = query.trim();
+  let q = "mimeType = 'application/vnd.google-apps.document' and trashed = false";
+  if (query) q += " and name contains '" + query.replace(/\\/g,'\\\\').replace(/'/g,"\\'") + "'";
+  const files=[], seen=new Set(), tokens=new Set();
+  let pageToken, incomplete=false, more=false;
   try {
-    response = Drive.Files.list({q:"mimeType = 'application/vnd.google-apps.document' and trashed = false", orderBy:'viewedByMeTime desc', pageSize:50, fields:'files(id,name,viewedByMeTime,capabilities(canEdit))'});
-  } catch (_) { throw new Error('Could not load recent Google Docs. Check Drive authorization or enter a document URL manually.'); }
-  return (response.files || []).filter(file => file && /^[A-Za-z0-9_-]{10,200}$/.test(file.id || '') && file.capabilities && file.capabilities.canEdit === true).slice(0,20).map(file => ({id:file.id, title:typeof file.name === 'string' ? file.name.slice(0,200) : 'Untitled document'}));
+    for (let page=0;page<10 && files.length<20;page++) {
+      const options={q,orderBy:'recency desc',pageSize:100,corpora:'allDrives',includeItemsFromAllDrives:true,supportsAllDrives:true,fields:'nextPageToken,incompleteSearch,files(id,name,capabilities(canEdit))'};
+      if (pageToken) options.pageToken=pageToken;
+      const response=Drive.Files.list(options);
+      if (!response || (response.files !== undefined && !Array.isArray(response.files))) throw new Error('Invalid Drive response');
+      incomplete = incomplete || response.incompleteSearch === true;
+      const batch=response.files || [];
+      for (let i=0;i<batch.length;i++) {
+        const file=batch[i];
+        if (!file || !/^[A-Za-z0-9_-]{10,200}$/.test(file.id || '') || seen.has(file.id) || (file.capabilities && file.capabilities.canEdit === false)) continue;
+        seen.add(file.id);
+        files.push({id:file.id,title:typeof file.name === 'string' ? file.name.slice(0,200) : 'Untitled document',canEdit:!!(file.capabilities && file.capabilities.canEdit === true)});
+        if (files.length === 20) { more = i < batch.length-1 || !!response.nextPageToken; break; }
+      }
+      pageToken=response.nextPageToken;
+      if (!pageToken || files.length === 20) break;
+      if (typeof pageToken !== 'string' || tokens.has(pageToken)) throw new Error('Invalid Drive page token');
+      tokens.add(pageToken);
+      if (page === 9) more=true;
+    }
+  } catch (_) {
+    throw new Error('Could not load Google Docs from Drive. Open the web app directly to authorize it, check the Drive advanced service and API are enabled, and verify the signed-in account. You can also enter a document URL.');
+  }
+  return {files,more,incomplete};
 }
 
 // Tables require a read between insertion and population: Google supplies cell
@@ -251,8 +280,15 @@ function inspectDocument_(id) {
   if (end < 1) throw new Error('Invalid document range.');
   return {id, title:doc.title || '', revision:doc.revisionId, tabId:doc.tabs[0].tabProperties.tabId, end};
 }
+// Object property order may change across google.script.run calls. Hash a
+// canonical representation while retaining array order and every validated value.
+function canonicalJson_(value) {
+  if (Array.isArray(value)) return '[' + value.map(canonicalJson_).join(',') + ']';
+  if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonicalJson_(value[key])).join(',') + '}';
+  return JSON.stringify(value);
+}
 function digest_(payload) {
-  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, JSON.stringify(payload), Utilities.Charset.UTF_8).map(b => ('0'+((b+256)%256).toString(16)).slice(-2)).join('');
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, canonicalJson_(payload), Utilities.Charset.UTF_8).map(b => ('0'+((b+256)%256).toString(16)).slice(-2)).join('');
 }
 function prepareOverwrite(value, input) {
   const payload=validatePayload_(input);
@@ -271,7 +307,8 @@ function overwriteDocument(ticket, confirmation, input) {
     const cache=CacheService.getUserCache(), key='overwrite:'+ticket, raw=cache.get(key); cache.remove(key);
     if (!raw) throw new Error('The overwrite confirmation expired. Inspect the document again.');
     const saved=JSON.parse(raw);
-    if (confirmation !== saved.document.title || digest_(payload) !== saved.digest) throw new Error('The confirmation or content changed. Inspect the document again.');
+    if (confirmation !== saved.document.title) throw new Error('The title did not match the existing Google Doc. Inspect it again and type its exact title.');
+    if (digest_(payload) !== saved.digest) throw new Error('The export content changed after inspection. Inspect the document again.');
     const current=inspectDocument_(saved.document.id);
     if (current.revision !== saved.document.revision || current.tabId !== saved.document.tabId || current.end !== saved.document.end || current.title !== saved.document.title) throw new Error('The document changed. Inspect it again before overwriting.');
     const requests=requestsForPayload_(payload,current.tabId);
