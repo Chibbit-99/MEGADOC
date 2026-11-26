@@ -41,6 +41,24 @@ rejects(()=>exec('documentId_',`https://evil.example/document/d/${id}/edit`),/va
 rejects(()=>exec('validatePayload_', {...payload,blocks:[{kind:'NORMAL_TEXT',runs:[{text:'bad\nline'}]}]}),/unsupported/);
 rejects(()=>exec('validatePayload_', {...payload,blocks:[{kind:'NORMAL_TEXT',runs:[{text:'\ud800'}]}]}),/unsupported/);
 rejects(()=>exec('validatePayload_', {...payload,blocks:[{kind:'NORMAL_TEXT',runs:[{text:'a',style:{link:'javascript:alert(1)'}}]}]}),/Unsupported/);
+// Rich formatting, paragraph geometry and nested list indices (UTF-16).
+const richInput={version:1,title:'Rich',blocks:[
+  {kind:'HEADING_1',paragraph:{alignment:'CENTER',lineSpacing:150,indentStart:36,indentFirstLine:18},runs:[{text:'😀A',style:{bold:true,fontFamily:'Arial',fontSize:16,foregroundColor:'#ff0000',backgroundColor:'#00ff00'}}]},
+  {kind:'NORMAL_TEXT',list:{type:'BULLET',level:0},runs:[{text:'One',style:{italic:true}}]},
+  {kind:'NORMAL_TEXT',list:{type:'BULLET',level:1},runs:[{text:'Two',style:{underline:true,link:'https://example.com'}}]},
+  {kind:'NORMAL_TEXT',list:{type:'NUMBER',level:0},runs:[{text:'End'}]}
+]};
+const normalized=exec('validatePayload_',richInput), richRequests=exec('requestsForPayload_',normalized,'t.0');
+assert.equal(richRequests[0].insertText.text,'😀A\nOne\n\tTwo\nEnd\n');
+const heading=richRequests.find(r=>r.updateParagraphStyle && r.updateParagraphStyle.paragraphStyle.namedStyleType==='HEADING_1').updateParagraphStyle;
+assert.equal(heading.paragraphStyle.alignment,'CENTER'); assert.equal(heading.paragraphStyle.lineSpacing,150); assert.equal(heading.paragraphStyle.indentStart.magnitude,36); assert.equal(heading.paragraphStyle.indentFirstLine.magnitude,18); assert.equal(heading.range.tabId,'t.0');
+const colored=richRequests.find(r=>r.updateTextStyle && r.updateTextStyle.textStyle.foregroundColor).updateTextStyle;
+assert.equal(colored.range.startIndex,1); assert.equal(colored.range.endIndex,4); assert.equal(colored.textStyle.fontSize.magnitude,16); assert.equal(colored.textStyle.weightedFontFamily.fontFamily,'Arial'); assert.equal(colored.textStyle.foregroundColor.color.rgbColor.red,1); assert.equal(colored.textStyle.backgroundColor.color.rgbColor.green,1);
+const bullets=richRequests.filter(r=>r.createParagraphBullets).map(r=>r.createParagraphBullets);
+assert.equal(bullets.length,2); assert.equal(bullets[0].bulletPreset,'NUMBERED_DECIMAL_ALPHA_ROMAN'); assert.equal(bullets[0].range.startIndex,14); assert.equal(bullets[1].range.startIndex,5); assert.equal(bullets[1].range.endIndex,14); assert.equal(bullets[1].range.tabId,'t.0');
+rejects(()=>exec('validatePayload_', {...richInput,blocks:[{kind:'NORMAL_TEXT',paragraph:{indentStart:-1},runs:[]}]}),/paragraph/);
+rejects(()=>exec('validatePayload_', {...richInput,blocks:[{kind:'NORMAL_TEXT',list:{type:'BULLET',level:9},runs:[]}]}),/list/);
+rejects(()=>exec('validatePayload_', {...richInput,blocks:[{kind:'NORMAL_TEXT',runs:[{text:'x',style:{foregroundColor:'url(https://bad.example)'}}]}]}),/Unsupported/);
 const out=exec('createDocument',payload);
 assert.equal(out.ok,true);
 let update=calls.find(c=>c.method==='batchUpdate');
