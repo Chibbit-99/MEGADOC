@@ -1,6 +1,6 @@
 # Plan: Google Docs export through an Apps Script web app
 
-**Status: planning only.** MegaDoc currently remains local-first; this would be an optional integration requiring a user-configured deployment and Google authorization. No Google credentials, tokens, document IDs, or deployed URLs belong in this repository. A MegaDoc tab is not the same thing as a Google Docs tab.
+**Status: long-term design.** An experimental plain-text iframe/postMessage subset is now implemented; see `google-apps-script/README.md` for its actual security and compatibility limitations. It does not satisfy all the safeguards or conversion goals below and has not been verified with a real deployment. MegaDoc remains local-first until the user explicitly exports through a configured deployment. No Google credentials, tokens, document IDs, or private deployed URLs belong in this repository. A MegaDoc tab is not the same thing as a Google Docs tab.
 
 ## Goal and user flow
 

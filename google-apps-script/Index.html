@@ -14,11 +14,13 @@
 </head>
 <body>
   <h1>Export to Google Docs</h1>
-  <p>Paste a single MegaDoc tab as plain text, or provide a structured export using the documented JSON format. This standalone prototype does not connect to MegaDoc automatically.</p>
+  <p>Paste a single MegaDoc tab as plain text, or provide a structured export using the documented JSON format. You can also open this app from MegaDoc’s Google Docs export dialog.</p>
+  <p class="note">Only use this page when you intentionally opened your trusted deployment. An embedded page can be disguised by other websites; if anything looks unexpected, close it and open the deployment directly.</p>
+  <p class="note">This page’s current HTML-service origin: <code id="scriptOrigin"></code>. Use this exact origin when configuring MegaDoc; it can change after deployment or account changes.</p>
   <p class="note">Content is sent to Google Apps Script and the Google Docs API when you export. Use only a deployment you trust. Existing document overwrites are permanent changes; make a backup first.</p>
   <label for="mode">Content format</label>
   <select id="mode"><option value="text">Plain text</option><option value="json">Structured JSON</option></select>
-  <label for="title">New document title</label><input id="title" maxlength="120" value="MegaDoc export">
+  <label for="title">New document title (plain text mode)</label><input id="title" maxlength="120" value="MegaDoc export">
   <label for="content">Tab content</label><textarea id="content" spellcheck="true"></textarea>
   <button id="create">Create new Google Doc</button>
   <h2>Replace an existing Google Doc</h2>
@@ -35,8 +37,35 @@
   <script>
     (() => {
       'use strict';
+      const boot = <?!= boot ?>;
       const $ = id => document.getElementById(id);
-      let ticket = null, pending = null, busy = false;
+      let ticket = null, pending = null, busy = false, touched = false, received = false;
+      $('scriptOrigin').textContent = self.origin || 'unavailable';
+      // The request ID only correlates this load; it does not authenticate the host.
+      if (boot.request && !boot.allowedOrigins.length) $('status').textContent = 'No trusted MegaDoc origins are configured in the script properties.';
+      if (boot.request && self !== top) {
+        addEventListener('message', event => {
+          const message = event.data;
+          if (received || touched || busy || event.source !== top || !boot.allowedOrigins.includes(event.origin) || !message || message.type !== 'megadoc-export-payload' || message.version !== 1 || message.request !== boot.request) return;
+          const p = message.payload;
+          if (!p || p.version !== 1 || typeof p.title !== 'string' || p.title.length > 120 || !Array.isArray(p.blocks) || !p.blocks.length || p.blocks.length > 500) return;
+          let units = 0, runs = 0;
+          for (const block of p.blocks) {
+            if (!block || block.kind !== 'NORMAL_TEXT' || !Array.isArray(block.runs) || block.runs.length > 1) return;
+            for (const run of block.runs) {
+              if (!run || typeof run.text !== 'string' || !run.text || /[\x00-\x1f\x7f-\x9f\ue000-\uf8ff]/.test(run.text) || /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(run.text) || run.style !== undefined) return;
+              units += run.text.length; runs++;
+              if (units > 100000 || runs > 1000) return;
+            }
+          }
+          if (units + p.blocks.length > 100000 || !p.title.trim() || /[\x00-\x1f\x7f-\x9f]/.test(p.title)) return;
+          received = true;
+          $('mode').value = 'json'; $('content').value = JSON.stringify(p, null, 2); $('title').value = p.title;
+          $('status').textContent = 'Tab received. Review it and choose an export action.';
+          event.source.postMessage({type:'megadoc-export-received',version:1,request:boot.request}, event.origin);
+        });
+        for (const origin of boot.allowedOrigins) top.postMessage({type:'megadoc-export-ready',version:1,request:boot.request}, origin);
+      }
       const status = text => { $('status').textContent = text; };
       function clearConfirmation() { ticket = pending = null; $('confirm').hidden = true; $('confirmation').value = ''; }
       function setBusy(value) { busy = value; for (const id of ['create','inspect','overwrite','cancel','mode','title','content','document','confirmation']) $(id).disabled = value; }
@@ -52,7 +81,7 @@
           const link=document.createElement('a'); link.href=response.url; link.target='_blank'; link.rel='noopener noreferrer'; link.textContent='Open Google Doc'; $('status').appendChild(link);
         }
       }
-      for (const id of ['mode','title','content','document']) $(id).addEventListener('input', () => { if (!busy) clearConfirmation(); });
+      for (const id of ['mode','title','content','document']) $(id).addEventListener('input', () => { touched = true; if (!busy) clearConfirmation(); });
       $('cancel').addEventListener('click', clearConfirmation);
       $('create').addEventListener('click', () => {
         let data; try { data=payload(); } catch (_) { status('Invalid structured JSON.'); return; }

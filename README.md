@@ -117,4 +117,4 @@ Spelling suggestions use locally bundled [nspell](https://github.com/wooorm/nspe
 
 ### Google Docs export prototype
 
-A separate, standalone Google Apps Script project is available in [`google-apps-script/`](google-apps-script/README.md). It requires manual deployment and is not yet connected to the MegaDoc editor; see its setup and safety limitations before use.
+Deploy the separate [`google-apps-script/`](google-apps-script/README.md) project and enter its web-app URL in **File → Export current tab to Google Docs**. This experimental iframe flow transfers plain text using a guarded browser message, not a content-bearing URL; it requires origin configuration and has not been tested with a real Google deployment. See the setup, authorization, clickjacking and privacy limitations before use.

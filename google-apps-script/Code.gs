@@ -1,18 +1,30 @@
 /* MegaDoc Google Docs export prototype. Deploy to execute as the accessing
    user. Do not log payloads, document content, tokens or request URLs. */
-const MAX_TEXT_UNITS = 4000;
-const MAX_RUNS = 200;
+const MAX_TEXT_UNITS = 100000;
+const MAX_RUNS = 1000;
 const MAX_DOCUMENT_BYTES = 5 * 1024 * 1024;
 const TICKET_SECONDS = 300;
 
-// Standalone only: do not enable ALLOWALL until an embedded origin protocol has
-// been verified on a real deployment. No document content is accepted in URLs.
-function doGet() {
-  return HtmlService.createHtmlOutputFromFile('Index').setTitle('MegaDoc export');
+// A deployed HTML-service web app is embeddable by any site when ALLOWALL is
+// enabled. No document writes or content are accepted from URL parameters.
+function doGet(e) {
+  const params = (e && e.parameters) || {};
+  const requested = e && e.parameter && e.parameter.request;
+  const validRequest = (!params.request || params.request.length === 1) && typeof requested === 'string' && /^[a-f0-9]{32}$/.test(requested);
+  const boot = {request: validRequest ? requested : '', allowedOrigins: approvedOrigins_()};
+  const template = HtmlService.createTemplateFromFile('Index');
+  template.boot = JSON.stringify(boot).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+  return template.evaluate().setTitle('MegaDoc export').setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+function approvedOrigins_() {
+  const raw = PropertiesService.getScriptProperties().getProperty('MEGADOC_ALLOWED_ORIGINS');
+  let origins; try { origins = JSON.parse(raw || '[]'); } catch (_) { return []; }
+  if (!Array.isArray(origins) || origins.length > 20) return [];
+  return origins.filter(origin => typeof origin === 'string' && origin.length <= 255 && /^(?:https:\/\/[a-z0-9.-]+(?::[0-9]{1,5})?|http:\/\/(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?)$/.test(origin));
 }
 
 function validatePayload_(input) {
-  if (!input || typeof input !== 'object' || Array.isArray(input) || input.version !== 1 || typeof input.title !== 'string' || !input.title.trim() || input.title.length > 120 || !Array.isArray(input.blocks) || !input.blocks.length || input.blocks.length > 80) throw new Error('Invalid export content.');
+  if (!input || typeof input !== 'object' || Array.isArray(input) || input.version !== 1 || typeof input.title !== 'string' || !input.title.trim() || input.title.length > 120 || !Array.isArray(input.blocks) || !input.blocks.length || input.blocks.length > 500) throw new Error('Invalid export content.');
   if (/[\x00-\x1f\x7f-\x9f]/.test(input.title)) throw new Error('The title contains unsupported characters.');
   let count = 0, length = 0;
   const blocks = input.blocks.map(block => {
