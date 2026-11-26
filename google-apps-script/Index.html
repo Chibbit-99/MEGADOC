@@ -14,7 +14,7 @@
 </head>
 <body>
   <h1>Export to Google Docs</h1>
-  <p>Paste a single MegaDoc tab as plain text, or provide a structured export using the documented JSON format. You can also open this app from MegaDoc’s Google Docs export dialog.</p>
+  <p>Export a MegaDoc tab with supported formatting, or paste plain text or structured JSON. You can also open this app from MegaDoc’s Google Docs export dialog.</p>
   <p class="note">Only use this page when you intentionally opened your trusted deployment. An embedded page can be disguised by other websites; if anything looks unexpected, close it and open the deployment directly.</p>
   <p class="note">Content is sent to Google Apps Script and the Google Docs API when you export. Use only a deployment you trust. Existing document overwrites are permanent changes; make a backup first.</p>
   <label for="mode">Content format</label>
@@ -49,17 +49,56 @@
           const message = event.data;
           if (received || touched || busy || event.source !== top || !boot.allowedOrigins.includes(event.origin) || !message || message.type !== 'megadoc-export-payload' || message.version !== 1 || message.request !== boot.request) return;
           const p = message.payload;
-          if (!p || p.version !== 1 || typeof p.title !== 'string' || p.title.length > 120 || !Array.isArray(p.blocks) || !p.blocks.length || p.blocks.length > 500) return;
-          let units = 0, runs = 0;
-          for (const block of p.blocks) {
-            if (!block || block.kind !== 'NORMAL_TEXT' || !Array.isArray(block.runs) || block.runs.length > 1) return;
+          try { if (JSON.stringify(p).length > 1000000) return; } catch (_) { return; }
+          if (!p || p.version !== 1 || typeof p.title !== 'string' || p.title.length > 120 || !p.title.trim() || /[\x00-\x1f\x7f-\x9f]/.test(p.title) || !Array.isArray(p.blocks) || !p.blocks.length || p.blocks.length > 500) return;
+          let units = 0, runs = 0, paragraphs = 0, tables = 0, cells = 0;
+          const queue=p.blocks.map(block=>({block,inCell:false}));
+          for (let i=0;i<queue.length;i++) {
+            const {block,inCell}=queue[i];
+            if (block && block.kind === 'TABLE') {
+              if (inCell || ++tables > 10 || !Array.isArray(block.rows) || !block.rows.length || block.rows.length > 20 || !Array.isArray(block.rows[0]) || !block.rows[0].length || block.rows[0].length > 20) return;
+              const cols=block.rows[0].length; cells+=cols*block.rows.length;
+              if (cells > 200 || !Array.isArray(block.widths) || block.widths.length !== cols || block.widths.some(v=>v !== null && (typeof v !== 'number' || !Number.isFinite(v) || v < 12 || v > 1500))) return;
+              if (block.heights !== undefined && (!Array.isArray(block.heights) || block.heights.length !== block.rows.length || block.heights.some(v=>v !== null && (typeof v !== 'number' || !Number.isFinite(v) || v < 0.75 || v > 1500)))) return;
+              for (const row of block.rows) {
+                if (!Array.isArray(row) || row.length !== cols) return;
+                for (const cell of row) {
+                  if (!cell || !Array.isArray(cell.blocks) || !cell.blocks.length || cell.blocks.length > 500 || (cell.backgroundColor !== undefined && (typeof cell.backgroundColor !== 'string' || !/^#[0-9a-f]{6}$/i.test(cell.backgroundColor)))) return;
+                  for (const child of cell.blocks) queue.push({block:child,inCell:true});
+                }
+              }
+              continue;
+            }
+            if (++paragraphs > 500) return;
+            if (!block || !['NORMAL_TEXT','HEADING_1','HEADING_2','HEADING_3','HEADING_4','HEADING_5','HEADING_6'].includes(block.kind) || !Array.isArray(block.runs)) return;
+            if (block.paragraph !== undefined && (!block.paragraph || typeof block.paragraph !== 'object' || Array.isArray(block.paragraph))) return;
+            for (const [key,value] of Object.entries(block.paragraph || {})) {
+              if (key === 'alignment' && ['START','CENTER','END','JUSTIFIED'].includes(value)) continue;
+              if (key === 'lineSpacing' && typeof value === 'number' && Number.isFinite(value) && value >= 50 && value <= 400) continue;
+              if (['indentStart','indentFirstLine','indentEnd','spaceAbove','spaceBelow'].includes(key) && typeof value === 'number' && Number.isFinite(value) && value >= (key === 'indentFirstLine' ? -200 : 0) && value <= 400) continue;
+              return;
+            }
+            if (block.list !== undefined) {
+              if (!block.list || typeof block.list !== 'object' || Array.isArray(block.list) || Object.keys(block.list).some(k=>!['type','level'].includes(k)) || !['BULLET','NUMBER'].includes(block.list.type) || !Number.isInteger(block.list.level) || block.list.level < 0 || block.list.level > 8) return;
+              units += block.list.level;
+            }
             for (const run of block.runs) {
-              if (!run || typeof run.text !== 'string' || !run.text || /[\x00-\x1f\x7f-\x9f\ue000-\uf8ff]/.test(run.text) || /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(run.text) || run.style !== undefined) return;
+              if (!run || typeof run.text !== 'string' || !run.text || /[\x00-\x1f\x7f-\x9f\ue000-\uf8ff]/.test(run.text) || /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(run.text)) return;
+              if (run.style !== undefined && (!run.style || typeof run.style !== 'object' || Array.isArray(run.style))) return;
+              for (const [key,value] of Object.entries(run.style || {})) {
+                if (['bold','italic','underline','strikethrough'].includes(key) && typeof value === 'boolean') continue;
+                if (key === 'link' && typeof value === 'string' && /^https?:\/\/[^\s<>"']{1,2000}$/i.test(value)) continue;
+                if (key === 'fontFamily' && typeof value === 'string' && /^[\w .-]{1,80}$/.test(value)) continue;
+                if (key === 'fontSize' && typeof value === 'number' && Number.isFinite(value) && value >= 6 && value <= 96) continue;
+                if (['foregroundColor','backgroundColor'].includes(key) && typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)) continue;
+                if (key === 'baselineOffset' && ['SUPERSCRIPT','SUBSCRIPT'].includes(value)) continue;
+                return;
+              }
               units += run.text.length; runs++;
               if (units > 100000 || runs > 1000) return;
             }
           }
-          if (units + p.blocks.length > 100000 || !p.title.trim() || /[\x00-\x1f\x7f-\x9f]/.test(p.title)) return;
+          if (units + paragraphs > 100000) return;
           received = true;
           $('mode').value = 'json'; $('content').value = JSON.stringify(p, null, 2); $('title').value = p.title;
           $('status').textContent = 'Tab received. Review it and choose an export action.';

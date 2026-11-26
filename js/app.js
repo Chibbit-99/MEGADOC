@@ -2096,12 +2096,186 @@ function googleDocsSettings() {
 function saveGoogleDocsSettings(settings) {
   try { localStorage.setItem(GOOGLE_DOCS_SETTINGS_KEY,JSON.stringify(settings)); return true; } catch (_) { return false; }
 }
-function googleDocsPayload(tab, text) {
+// Convert the live editor DOM into a constrained Docs model; never execute or
+// forward HTML. Lengths in the model and Docs ranges are UTF-16 code units.
+function googleDocsPayload(tab, root, context = null) {
   const title = (tab.title || 'MegaDoc tab').trim();
-  const lines = text.replace(/\r\n?/g, '\n').split('\n');
   if (!title || title.length > 120 || /[\x00-\x1f\x7f-\x9f]/.test(title)) throw new Error('The tab title must be 1–120 characters without control characters.');
-  if (lines.length > 500 || text.length + lines.length > 100000 || lines.some(line => /[\x00-\x1f\x7f-\x9f\ue000-\uf8ff]/.test(line) || /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(line))) throw new Error('This tab exceeds the supported text limits or contains unsupported characters. Use a plain-text export instead.');
-  return {version:1,title,blocks:lines.map(line => ({kind:'NORMAL_TEXT',runs:line ? [{text:line}] : []}))};
+  const blocks = [], warnings = new Set(); let current = null;
+  const number = (value, min, max) => Number.isFinite(value) && value >= min && value <= max ? Math.round(value * 100) / 100 : undefined;
+  function points(value) {
+    const match = /^(-?\d+(?:\.\d+)?)(px|pt)$/i.exec((value || '').trim());
+    return match ? Number(match[1]) * (match[2].toLowerCase() === 'px' ? 0.75 : 1) : undefined;
+  }
+  function color(value, element, background = false) {
+    if (!value) return;
+    let str = value.trim();
+    if (/^#[\da-f]{3}$/i.test(str)) return '#' + [...str.slice(1)].map(x=>x+x).join('').toLowerCase();
+    if (/^#[\da-f]{6}$/i.test(str)) return str.toLowerCase();
+    if (!/^rgba?\(/i.test(str)) { try { str = background ? getComputedStyle(element).backgroundColor : getComputedStyle(element).color; } catch (_) { return; } }
+    const m = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\s*\)$/i.exec(str);
+    if (!m || (m[4] !== undefined && Number(m[4]) < 1) || [m[1],m[2],m[3]].some(v => Number(v) > 255)) return;
+    return '#' + [m[1],m[2],m[3]].map(v=>Number(v).toString(16).padStart(2,'0')).join('');
+  }
+  function inlineStyle(el, inherited) {
+    const result = {...inherited}, tag = el.tagName, css = el.style;
+    if (tag === 'B' || tag === 'STRONG') result.bold = true;
+    if (tag === 'I' || tag === 'EM') result.italic = true;
+    if (tag === 'U') result.underline = true;
+    if (tag === 'S' || tag === 'STRIKE' || tag === 'DEL') result.strikethrough = true;
+    if (tag === 'SUP') result.baselineOffset = 'SUPERSCRIPT';
+    if (tag === 'SUB') result.baselineOffset = 'SUBSCRIPT';
+    if (tag === 'MARK') result.backgroundColor = '#ffff00';
+    if (tag === 'CODE' || tag === 'PRE') { result.fontFamily = 'Roboto Mono'; result.fontSize = 10; }
+    if (tag === 'BLOCKQUOTE') { result.italic = true; result.foregroundColor = '#333333'; }
+    if (tag === 'A') { result.underline = true; result.foregroundColor = '#1155cc'; }
+    if (css.fontWeight) { const w = css.fontWeight.toLowerCase(); result.bold = w === 'bold' || w === 'bolder' || Number(w) >= 600; }
+    if (css.fontStyle) result.italic = /^(italic|oblique)/i.test(css.fontStyle);
+    const decoration = css.textDecorationLine || css.textDecoration;
+    if (decoration) { if (/underline/i.test(decoration)) result.underline = true; if (/line-through/i.test(decoration)) result.strikethrough = true; }
+    const family = (css.fontFamily || (tag === 'FONT' ? el.getAttribute('face') : '') || '').split(',')[0].trim().replace(/^["']|["']$/g,'');
+    if (/^[\w .-]{1,80}$/.test(family)) result.fontFamily = family;
+    let size = points(css.fontSize);
+    if (size === undefined && tag === 'FONT' && /^[1-7]$/.test(el.getAttribute('size') || '')) size = [0,8,10,12,14,18,24,36][Number(el.getAttribute('size'))];
+    size = number(size,6,96); if (size !== undefined) result.fontSize = size;
+    const foreground = color(css.color || (tag === 'FONT' ? el.getAttribute('color') : ''),el);
+    if (foreground) result.foregroundColor = foreground;
+    const background = color(css.backgroundColor,el,true); if (background) result.backgroundColor = background;
+    if (tag === 'A') {
+      const href = el.getAttribute('href') || '';
+      if (/^https?:\/\/[^\s<>"']{1,2000}$/i.test(href)) result.link = href;
+      else if (href) warnings.add('Internal links cannot be converted.');
+    }
+    return result;
+  }
+  function paragraphStyle(el, inherited) {
+    const result = {...inherited}, css = el.style;
+    // Mirror editor CSS defaults before applying user-set inline overrides.
+    const defaults = {P:{spaceBelow:7.5}, H1:{spaceAbove:0,spaceBelow:9,lineSpacing:125}, H2:{spaceAbove:13.5,spaceBelow:6,lineSpacing:130}, H3:{spaceAbove:10.5,spaceBelow:4.5}, BLOCKQUOTE:{spaceAbove:7.5,spaceBelow:7.5,indentStart:10.5,indentFirstLine:10.5}, PRE:{spaceAbove:7.5,spaceBelow:7.5}};
+    Object.assign(result,defaults[el.tagName] || {});
+    const alignment = (css.textAlign || el.getAttribute('align') || '').toLowerCase();
+    if ({left:'START',start:'START',center:'CENTER',right:'END',end:'END',justify:'JUSTIFIED'}[alignment]) result.alignment = {left:'START',start:'START',center:'CENTER',right:'END',end:'END',justify:'JUSTIFIED'}[alignment];
+    if (/^(?:\d+(?:\.\d+)?%?|\.\d+)$/.test(css.lineHeight)) { const value = Number.parseFloat(css.lineHeight) * (css.lineHeight.endsWith('%') ? 1 : 100); const v = number(value,50,400); if (v !== undefined) result.lineSpacing = v; }
+    let left = points(css.marginLeft); if (left === undefined && el.tagName === 'BLOCKQUOTE') left = 10.5;
+    const right = points(css.marginRight), first = points(css.textIndent), above = points(css.marginTop), below = points(css.marginBottom);
+    if (left !== undefined) { const v = number(left,0,400); if (v !== undefined) result.indentStart = v; }
+    if (first !== undefined || left !== undefined) { const v = number((result.indentStart || 0) + (first || 0),-200,400); if (v !== undefined) result.indentFirstLine = v; }
+    for (const [key,value] of [['indentEnd',right],['spaceAbove',above],['spaceBelow',below]]) { const v = number(value,0,400); if (v !== undefined) result[key] = v; }
+    return result;
+  }
+  function flush(force) { if (current && (force || current.runs.length)) blocks.push(current); current = null; }
+  function createBlock(kind,paragraph,list) { return {kind,paragraph:{...paragraph},...(list ? {list:{...list}} : {}),runs:[]}; }
+  function append(text,style,para,list) {
+    const pieces = text.replace(/\r\n?/g,'\n').replace(/\t/g,'    ').split('\n');
+    for (let i=0; i<pieces.length; i++) {
+      if (!current) current = createBlock('NORMAL_TEXT',para,list);
+      const part=pieces[i];
+      if (part) {
+        if (/[\x00-\x1f\x7f-\x9f\ue000-\uf8ff]/.test(part) || /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(part)) throw new Error('This tab contains unsupported text characters.');
+        const last = current.runs[current.runs.length-1];
+        if (last && JSON.stringify(last.style) === JSON.stringify(style)) last.text += part; else current.runs.push({text:part,style:{...style}});
+      }
+      if (i < pieces.length-1) { const prior=current; flush(true); current=createBlock(prior.kind,prior.paragraph,prior.list); }
+    }
+  }
+  function walk(node, style, para, list, depth, preserve) {
+    if (depth > 100) throw new Error('This tab is too deeply nested to export.');
+    if (node.nodeType === Node.TEXT_NODE) {
+      let text = node.data;
+      if (!preserve) {
+        text = text.replace(/[\t\n\r\f ]+/g,' ');
+        const last = current?.runs[current.runs.length-1];
+        if (!last) text = text.replace(/^ /,'');
+        else if (last.text.endsWith(' ') && text.startsWith(' ')) text = text.slice(1);
+      }
+      if (text) append(text,style,para,list); return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const tag=node.tagName;
+    if (['SCRIPT','STYLE','IFRAME','OBJECT','SVG'].includes(tag)) { warnings.add('Some embedded content was omitted.'); return; }
+    if (tag === 'IMG' || tag === 'VIDEO' || tag === 'CANVAS') { warnings.add('Images and media are not exported.'); return; }
+    if (tag === 'HR') { warnings.add('Page breaks and rules are not exported.'); return; }
+    if (tag === 'TABLE') {
+      if (context?.inTable || list || node.querySelector('table')) throw new Error('Nested tables or tables inside lists are not supported. Export them separately or simplify the layout.');
+      const rows = [...node.rows];
+      const columns = rows[0]?.cells.length || 0;
+      if (!rows.length || rows.length > 20 || !columns || columns > 20 || rows.length * columns > 200 || rows.some(row => row.cells.length !== columns || [...row.cells].some(cell => cell.rowSpan !== 1 || cell.colSpan !== 1))) throw new Error('Google Docs export currently requires rectangular tables without merged cells (maximum 20 rows, 20 columns and 200 cells).');
+      flush(false);
+      warnings.add('Tables are supported only when creating a new Google Doc; spacing, padding and borders may differ.');
+      const tableStyle=inlineStyle(node,style), tablePara=paragraphStyle(node,para);
+      const widths=[];
+      for (let c=0;c<columns;c++) {
+        const width=number(points(rows[0].cells[c].style.width),12,1500);
+        widths.push(width === undefined ? null : width);
+      }
+      const heights=rows.map(row=>number(points(row.style.height),0.75,1500) ?? null);
+      if (node.querySelector('colgroup,col') || rows.some(row=>(row.style.height && points(row.style.height) === undefined) || [...row.cells].some(cell=>cell.style.border || (cell.style.width && points(cell.style.width) === undefined)))) warnings.add('Some table sizing or border styles may differ.');
+      const outputRows=rows.map(row => [...row.cells].map(cell => {
+        if (cell.querySelector('table')) throw new Error('Nested tables are not supported by Google Docs export.');
+        let cellTextStyle=inlineStyle(cell,{...tableStyle,fontSize:10.5});
+        if (cell.tagName === 'TH' && !cell.style.fontWeight) cellTextStyle.bold=true;
+        const background=color(cell.style.backgroundColor,cell,true) || (cell.tagName === 'TH' ? '#f1f3f4' : undefined);
+        // Cell fill is applied to the cell itself, not copied as text highlight.
+        if (cell.style.backgroundColor) { cellTextStyle={...cellTextStyle}; delete cellTextStyle.backgroundColor; }
+        const converted=googleDocsPayload(tab,cell,{inTable:true,style:cellTextStyle,paragraph:paragraphStyle(cell,tablePara)});
+        for (const warning of converted.warnings) warnings.add(warning);
+        return {blocks:converted.blocks,...(background ? {backgroundColor:background} : {})};
+      }));
+      blocks.push({kind:'TABLE',rows:outputRows,widths,heights});
+      return;
+    }
+    if (node.hasAttribute('data-megadoc-equation')) { warnings.add('Equations are exported as source text.'); append(node.getAttribute('data-megadoc-equation') || '',style,para,list); return; }
+    if (node.hasAttribute('data-megadoc-footnote')) warnings.add('Footnote text is not exported.');
+    if (tag === 'INPUT') { warnings.add('Interactive controls are not exported.'); return; }
+    if (tag === 'BR') {
+      if (!current) current = createBlock('NORMAL_TEXT',para,list);
+      // A sole or trailing BR is the browser's empty-paragraph placeholder.
+      if (!node.nextSibling) return;
+      if (list) warnings.add('Line breaks inside list items may become separate list items.');
+      const prior=current; flush(true); current=createBlock(prior.kind,prior.paragraph,prior.list); return;
+    }
+    const nextStyle=inlineStyle(node,style), nextPara=paragraphStyle(node,para);
+    const nextPreserve = node.style.whiteSpace ? /^(pre|pre-wrap|break-spaces)$/i.test(node.style.whiteSpace) : preserve || tag === 'PRE';
+    if (tag === 'UL' || tag === 'OL') {
+      if (node.hasAttribute('start') || node.hasAttribute('reversed') || node.style.listStyleType || (list && (list.level >= 8 || list.type !== (tag === 'OL' ? 'NUMBER' : 'BULLET')))) warnings.add('Some list markers, numbering or nesting may change.');
+      flush(false); const nextList={type:tag === 'OL' ? 'NUMBER' : 'BULLET',level:list ? Math.min(8,list.level+1) : 0};
+      for (const child of node.childNodes) walk(child,nextStyle,nextPara,nextList,depth+1,nextPreserve);
+      flush(false); return;
+    }
+    if (tag === 'LI' && node.hasAttribute('value')) warnings.add('Some list markers, numbering or nesting may change.');
+    const block = /^(P|DIV|H[1-6]|BLOCKQUOTE|PRE|LI|TR|TD|TH)$/.test(tag);
+    if (block) {
+      const blockList = list && (tag === 'LI' || (current && current.list && !current.runs.length)) ? list : null;
+      flush(false); const before=blocks.length, kind=/^H[1-6]$/.test(tag) ? 'HEADING_'+tag.slice(1) : 'NORMAL_TEXT';
+      let blockStyle=nextStyle;
+      if (/^H[1-6]$/.test(tag)) {
+        const key=tag.toLowerCase(), custom=state.paragraphStyles?.[key];
+        blockStyle={...nextStyle, bold:custom?.weight === 400 ? false : true, fontSize:custom?.size || ({h1:26,h2:20,h3:15,h4:13,h5:11,h6:10}[key])};
+        if (custom?.font && /^[\w .-]{1,80}$/.test(custom.font)) blockStyle.fontFamily=custom.font;
+        if (custom?.color && /^#[\da-f]{6}$/i.test(custom.color)) blockStyle.foregroundColor=custom.color;
+        // Explicit inline styles on the heading still take precedence.
+        blockStyle=inlineStyle(node,blockStyle);
+      }
+      current=createBlock(kind,nextPara,blockList);
+      for (const child of node.childNodes) walk(child,blockStyle,nextPara,blockList,depth+1,nextPreserve);
+      flush(true);
+      if (blocks.length === before) blocks.push(createBlock(kind,nextPara,blockList));
+      return;
+    }
+    for (const child of node.childNodes) walk(child,nextStyle,nextPara,list,depth+1,nextPreserve);
+  }
+  const base = state.paragraphStyles?.p || {}, baseStyle=context?.style ? {...context.style} : {fontFamily:'Arial',fontSize:11};
+  if (!context && base.font && /^[\w .-]{1,80}$/.test(base.font)) baseStyle.fontFamily=base.font;
+  if (!context && typeof base.size === 'number' && number(base.size,6,96) !== undefined) baseStyle.fontSize=base.size;
+  if (!context && base.weight === 700) baseStyle.bold=true;
+  if (!context && typeof base.color === 'string' && /^#[\da-f]{6}$/i.test(base.color)) baseStyle.foregroundColor=base.color;
+  for (const node of root.childNodes) walk(node,baseStyle,context?.paragraph || {lineSpacing:150},null,0,false);
+  flush(false); if (!blocks.length) blocks.push(createBlock('NORMAL_TEXT',{},null));
+  const allParagraphs=blocks.flatMap(b=>b.kind === 'TABLE' ? b.rows.flatMap(row=>row.flatMap(cell=>cell.blocks)) : [b]);
+  const tables=blocks.filter(b=>b.kind === 'TABLE');
+  const runs=allParagraphs.reduce((n,b)=>n+b.runs.length,0), length=allParagraphs.reduce((n,b)=>n+1+(b.list?.level||0)+b.runs.reduce((sum,r)=>sum+r.text.length,0),0);
+  if (tables.length > 10 || tables.reduce((n,t)=>n+t.rows.length*t.rows[0].length,0)>200 || allParagraphs.length > 500 || runs > 1000 || length > 100000) throw new Error('This tab exceeds the Google Docs export limits.');
+  return {version:1,title,blocks,warnings:[...warnings]};
 }
 // Google can nest the HTML-service window inside multiple cross-origin frames.
 // Window.parent is cross-origin-readable; never inspect their documents.
@@ -2121,7 +2295,7 @@ function googleDocsExportDialog() {
   const tab = getTab(state.activeTabId);
   if (!tab) { toast('Create a tab first', 'info'); return; }
   const id = state.activeTabId, saved = googleDocsSettings();
-  openModal('Export current tab to Google Docs', `<p>Paste the <b>/exec</b> web app link for your trusted Apps Script deployment. MegaDoc remembers the link in this browser. <a href="google-apps-script/README.md" target="_blank" rel="noopener noreferrer">Setup instructions</a>.</p><div class="field"><label for="googleDocsUrl">Apps Script deployment URL</label><input id="googleDocsUrl" type="url" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"></div><p>After you continue, this tab’s <b>plain text</b> is sent to the deployment, not in the URL. Formatting, images, comments, history and other tabs are not exported. Keep a JSON backup.</p><p>Only use a deployment you trust. Google sign-in is required. Custom MegaDoc hosts need to be allowed in the script. The embedded app is experimental and can be clickjacked.</p><p id="googleDocsError" role="alert"></p>`, `<button class="btn text" id="googleDocsForget">Forget saved link</button><button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Open exporter</button>`);
+  openModal('Export current tab to Google Docs', `<p>Paste the <b>/exec</b> web app link for your trusted Apps Script deployment. MegaDoc remembers the link in this browser. <a href="google-apps-script/README.md" target="_blank" rel="noopener noreferrer">Setup instructions</a>.</p><div class="field"><label for="googleDocsUrl">Apps Script deployment URL</label><input id="googleDocsUrl" type="url" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"></div><p>After you continue, this tab’s text and supported formatting are sent to the deployment, not in the URL. Images, comments, history and other tabs are not exported; some formatting may change. Tables can be exported to a new Google Doc. Keep a JSON backup.</p><p>Only use a deployment you trust. Google sign-in is required. Custom MegaDoc hosts need to be allowed in the script. The embedded app is experimental and can be clickjacked.</p><p id="googleDocsError" role="alert"></p>`, `<button class="btn text" id="googleDocsForget">Forget saved link</button><button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Open exporter</button>`);
   const input = $('#googleDocsUrl'); input.value = saved.url;
   let edited = false;
   input.addEventListener('input',() => { edited = true; });
@@ -2137,14 +2311,15 @@ function googleDocsExportDialog() {
       const url = googleDocsDeploymentUrl(input.value);
       if (!window.crypto?.getRandomValues) throw new Error('This browser cannot create a secure export request.');
       saveCurrentContent();
-      let payload = googleDocsPayload(tab, page.innerText);
+      let payload = googleDocsPayload(tab, page);
       const request = [...crypto.getRandomValues(new Uint8Array(16))].map(n => n.toString(16).padStart(2,'0')).join('');
       const directUrl = url.href, previous = googleDocsSettings();
       const settings = {url:directUrl, origin:previous.url === directUrl ? previous.origin : ''};
       const savedLocally = saveGoogleDocsSettings(settings);
       url.searchParams.set('request', request); // Correlation only, never document data or credentials.
-      openModal('Google Docs exporter', `<p>Waiting for your exporter. If it cannot connect, check the script’s allowed MegaDoc origins, sign in, or open it directly and paste a text export.</p><p id="googleDocsTransferStatus" role="status" aria-live="polite">Waiting for the iframe…</p><button id="googleDocsTrust" class="btn text hidden" type="button">Trust changed connection and send</button><p><a id="googleDocsTop" target="_blank" rel="noopener noreferrer">Open exporter directly</a></p><iframe id="googleDocsFrame" title="Google Docs exporter" referrerpolicy="no-referrer" style="width:100%;height:min(65vh,650px);border:1px solid #aaa;background:white"></iframe>`, `<button class="btn text" id="mCancel">Close</button>`);
+      openModal('Google Docs exporter', `<p>Waiting for your exporter. If it cannot connect, check the script’s allowed MegaDoc origins, sign in, or open it directly and paste a text export.</p><p id="googleDocsWarnings"></p><p id="googleDocsTransferStatus" role="status" aria-live="polite">Waiting for the iframe…</p><button id="googleDocsTrust" class="btn text hidden" type="button">Trust changed connection and send</button><p><a id="googleDocsTop" target="_blank" rel="noopener noreferrer">Open exporter directly</a></p><iframe id="googleDocsFrame" title="Google Docs exporter" referrerpolicy="no-referrer" style="width:100%;height:min(65vh,650px);border:1px solid #aaa;background:white"></iframe>`, `<button class="btn text" id="mCancel">Close</button>`);
       const frame = $('#googleDocsFrame'), status = $('#googleDocsTransferStatus'), trust = $('#googleDocsTrust');
+      $('#googleDocsWarnings').textContent = payload.warnings.join(' ');
       let peer = null, origin = '', candidate = null, done = false, timer;
       function cleanup() { if (done) return; done = true; payload = null; candidate = null; clearTimeout(timer); window.removeEventListener('message',onMessage); if (googleDocsCleanup === cleanup) googleDocsCleanup = null; }
       function send(source, destination) {
@@ -2170,7 +2345,7 @@ function googleDocsExportDialog() {
       }
       googleDocsCleanup = cleanup;
       window.addEventListener('message',onMessage);
-      timer = setTimeout(() => { status.textContent = 'Could not confirm transfer. Check the deployment, allowed MegaDoc origin and sign-in, or open the exporter directly and paste a text export.'; trust.classList.add('hidden'); cleanup(); },30000);
+      timer = setTimeout(() => { status.textContent = 'Could not confirm transfer. Check the deployment, sign-in and allowed origin. Redeploy the latest Apps Script files to accept formatted exports, or use the direct exporter.'; trust.classList.add('hidden'); cleanup(); },30000);
       $('#googleDocsTop').href=directUrl; frame.src=url.href;
       $('#mCancel').addEventListener('click', closeModal);
     } catch (error) { const errorElement = $('#googleDocsError'); if (errorElement) errorElement.textContent = error.message; }
