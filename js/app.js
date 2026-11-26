@@ -2075,7 +2075,11 @@ function exportLocalContent(format) {
 function googleDocsDeploymentUrl(value) {
   let url;
   try { url = new URL(value.trim()); } catch { throw new Error('Enter the deployed Apps Script web app URL.'); }
-  if (url.protocol !== 'https:' || url.hostname !== 'script.google.com' || url.port || url.username || url.password || url.search || url.hash || !/^\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url.pathname)) throw new Error('Use an HTTPS script.google.com/macros/s/.../exec deployment URL without parameters.');
+  const standard = /^\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url.pathname);
+  const workspace = /^\/a\/macros\/([^/]+)\/s\/[A-Za-z0-9_-]+\/exec$/.exec(url.pathname);
+  const domain = workspace && workspace[1];
+  const validDomain = domain && domain.length <= 253 && domain.includes('.') && domain.split('.').every(label => /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(label));
+  if (url.protocol !== 'https:' || url.hostname !== 'script.google.com' || url.port || url.username || url.password || url.search || url.hash || !(standard || validDomain)) throw new Error('Use an HTTPS script.google.com web app /exec URL, without parameters. Standard and Google Workspace deployment links are supported.');
   return url;
 }
 function googleDocsScriptOrigin(value) {
