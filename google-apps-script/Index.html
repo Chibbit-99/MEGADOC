@@ -16,7 +16,6 @@
   <h1>Export to Google Docs</h1>
   <p>Paste a single MegaDoc tab as plain text, or provide a structured export using the documented JSON format. You can also open this app from MegaDoc’s Google Docs export dialog.</p>
   <p class="note">Only use this page when you intentionally opened your trusted deployment. An embedded page can be disguised by other websites; if anything looks unexpected, close it and open the deployment directly.</p>
-  <p class="note">This page’s current HTML-service origin: <code id="scriptOrigin"></code>. Use this exact origin when configuring MegaDoc; it can change after deployment or account changes.</p>
   <p class="note">Content is sent to Google Apps Script and the Google Docs API when you export. Use only a deployment you trust. Existing document overwrites are permanent changes; make a backup first.</p>
   <label for="mode">Content format</label>
   <select id="mode"><option value="text">Plain text</option><option value="json">Structured JSON</option></select>
@@ -25,6 +24,9 @@
   <button id="create">Create new Google Doc</button>
   <h2>Replace an existing Google Doc</h2>
   <p class="note">Only simple, single-tab documents without comments, suggestions, lists or special objects are eligible. The existing text and formatting will be replaced; document metadata may remain.</p>
+  <button id="loadRecent" type="button">Load recent Google Docs</button>
+  <label for="recent">Recent editable Google Docs</label><select id="recent" disabled><option value="">Load recent documents or enter a URL below</option></select>
+  <p class="note">Listing recent documents requires permission to view files in Google Drive. This list shows up to 20 recently viewed editable Google Docs; it may not include every document.</p>
   <label for="document">Google Doc URL or ID</label><input id="document" autocomplete="off">
   <button id="inspect">Inspect document for overwrite</button>
   <section id="confirm" hidden>
@@ -40,7 +42,6 @@
       const boot = <?!= boot ?>;
       const $ = id => document.getElementById(id);
       let ticket = null, pending = null, busy = false, touched = false, received = false;
-      $('scriptOrigin').textContent = self.origin || 'unavailable';
       // The request ID only correlates this load; it does not authenticate the host.
       if (boot.request && !boot.allowedOrigins.length) $('status').textContent = 'No trusted MegaDoc origins are configured in the script properties.';
       if (boot.request && self !== top) {
@@ -68,7 +69,7 @@
       }
       const status = text => { $('status').textContent = text; };
       function clearConfirmation() { ticket = pending = null; $('confirm').hidden = true; $('confirmation').value = ''; }
-      function setBusy(value) { busy = value; for (const id of ['create','inspect','overwrite','cancel','mode','title','content','document','confirmation']) $(id).disabled = value; }
+      function setBusy(value) { busy = value; for (const id of ['create','inspect','overwrite','cancel','mode','title','content','document','confirmation','loadRecent','recent']) $(id).disabled = value; }
       function payload() {
         if ($('mode').value === 'json') return JSON.parse($('content').value);
         const text = $('content').value.replace(/\r\n?/g, '\n');
@@ -82,6 +83,16 @@
         }
       }
       for (const id of ['mode','title','content','document']) $(id).addEventListener('input', () => { touched = true; if (!busy) clearConfirmation(); });
+      $('recent').addEventListener('change', () => { if ($('recent').value) { $('document').value = $('recent').value; touched = true; clearConfirmation(); } });
+      $('loadRecent').addEventListener('click', () => {
+        clearConfirmation(); setBusy(true); status('Loading recent Google Docs…');
+        google.script.run.withSuccessHandler(files => {
+          setBusy(false); const select = $('recent'); select.replaceChildren();
+          const placeholder = document.createElement('option'); placeholder.value=''; placeholder.textContent = files.length ? 'Choose a recent document' : 'No editable recent documents found'; select.appendChild(placeholder);
+          for (const file of files) { if (!file || !/^[A-Za-z0-9_-]{10,200}$/.test(file.id || '') || typeof file.title !== 'string') continue; const option=document.createElement('option'); option.value=file.id; option.textContent=file.title; select.appendChild(option); }
+          status(files.length ? 'Select a recent document, then inspect it.' : 'No editable recent documents found; enter a URL or ID.');
+        }).withFailureHandler(error => { setBusy(false); status(error && error.message ? error.message : 'Could not load recent Google Docs. Enter a URL or ID.'); }).listRecentDocuments();
+      });
       $('cancel').addEventListener('click', clearConfirmation);
       $('create').addEventListener('click', () => {
         let data; try { data=payload(); } catch (_) { status('Invalid structured JSON.'); return; }

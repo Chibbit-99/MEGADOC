@@ -18,7 +18,8 @@ function doGet(e) {
 }
 function approvedOrigins_() {
   const raw = PropertiesService.getScriptProperties().getProperty('MEGADOC_ALLOWED_ORIGINS');
-  let origins; try { origins = JSON.parse(raw || '[]'); } catch (_) { return []; }
+  // Trust the official MegaDoc host by default; custom hosts must set this property.
+  let origins; try { origins = JSON.parse(raw === null ? '["https://chibbit-99.github.io"]' : raw); } catch (_) { return []; }
   if (!Array.isArray(origins) || origins.length > 20) return [];
   return origins.filter(origin => typeof origin === 'string' && origin.length <= 255 && /^(?:https:\/\/[a-z0-9.-]+(?::[0-9]{1,5})?|http:\/\/(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?)$/.test(origin));
 }
@@ -70,6 +71,15 @@ function requestsForPayload_(payload, tabId) {
     requests.push({updateTextStyle:{range, textStyle:style, fields:Object.keys(style).join(',')}});
   }
   return requests;
+}
+
+// Recent Google Docs visible to this user; listing alone never modifies files.
+function listRecentDocuments() {
+  let response;
+  try {
+    response = Drive.Files.list({q:"mimeType = 'application/vnd.google-apps.document' and trashed = false", orderBy:'viewedByMeTime desc', pageSize:50, fields:'files(id,name,viewedByMeTime,capabilities(canEdit))'});
+  } catch (_) { throw new Error('Could not load recent Google Docs. Check Drive authorization or enter a document URL manually.'); }
+  return (response.files || []).filter(file => file && /^[A-Za-z0-9_-]{10,200}$/.test(file.id || '') && file.capabilities && file.capabilities.canEdit === true).slice(0,20).map(file => ({id:file.id, title:typeof file.name === 'string' ? file.name.slice(0,200) : 'Untitled document'}));
 }
 
 function createDocument(input) {

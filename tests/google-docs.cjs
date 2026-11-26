@@ -2,19 +2,20 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), vm=require('node:vm'), {JSDOM}=require('jsdom');
 (async()=>{
   const dom=new JSDOM('<div id="modalBackdrop" class="hidden"><div id="modal"></div></div><div id="page"></div>', {url:'https://megadoc.example/',runScripts:'outside-only'});
-  const w=dom.window; let fetches=0, transferTimer; const realTimeout=w.setTimeout.bind(w); w.setTimeout=(fn,ms,...args)=> ms===30000 ? (transferTimer=fn,12345) : realTimeout(fn,ms,...args);
+  const w=dom.window; let fetches=0, transferTimer, defaultUrl='https://script.google.com/macros/s/DEPLOY/exec'; const realTimeout=w.setTimeout.bind(w); w.setTimeout=(fn,ms,...args)=> ms===30000 ? (transferTimer=fn,12345) : realTimeout(fn,ms,...args);
   const origin='https://n-test-script.googleusercontent.com', deploy='https://script.google.com/macros/s/DEPLOY/exec';
-  w.fetch=async()=>{fetches++;return {ok:true,json:async()=>({appsScriptUrl:deploy,htmlServiceOrigin:origin})}};
+  w.fetch=async()=>{fetches++;return {ok:true,json:async()=>({appsScriptUrl:defaultUrl})}};
+  w.eval("var GOOGLE_DOCS_SETTINGS_KEY='megadoc-google-docs-settings-v1'");
   w.eval(`var $ = s => document.querySelector(s); var state={activeTabId:'one'}; var tab={title:'My tab'}; var getTab = id => id==='one'?tab:null; var page=$('#page'); function toast(){} function saveCurrentContent(){} function openModal(title,body,foot){$('#modal').innerHTML=body+foot;$('#modalBackdrop').classList.remove('hidden')} function closeModal(){if (googleDocsCleanup) googleDocsCleanup(); $('#modalBackdrop').classList.add('hidden'); const frame=$('#googleDocsFrame'); if(frame){frame.remove();$('#googleDocsTop')?.removeAttribute('href')}}`);
   let src=fs.readFileSync('js/app.js','utf8'); src=src.slice(src.indexOf('function googleDocsDeploymentUrl('),src.indexOf('function localImportDialog()'));
   w.eval(src.replace('let googleDocsCleanup = null;','var googleDocsCleanup = null;')+"\nwindow.openExport=googleDocsExportDialog;"); w.eval("page.innerText='Hello 😀\\n'+ 'x'.repeat(5000); openExport()");
   await new Promise(resolve=>setTimeout(resolve,0));
-  assert.equal(fetches,1); assert.equal(w.document.querySelector('#googleDocsUrl').value,deploy); assert.equal(w.document.querySelector('#googleDocsOrigin').value,origin);
+  assert.equal(fetches,1); assert.equal(w.document.querySelector('#googleDocsUrl').value,deploy); assert.equal(w.document.querySelector('#googleDocsOrigin'),null);
   assert.equal(w.document.querySelector('iframe'),null); // Nothing sent before consent.
   w.document.querySelector('#googleDocsUrl').value='https://script.google.com.evil.test/macros/s/DEPLOY/exec';
   w.document.querySelector('#mOk').click(); assert.match(w.document.querySelector('#googleDocsError').textContent,/script.google.com/); assert.equal(w.document.querySelector('iframe'),null);
-  w.document.querySelector('#googleDocsUrl').value=deploy; w.document.querySelector('#googleDocsOrigin').value='https://evil.example'; w.document.querySelector('#mOk').click(); assert.equal(w.document.querySelector('iframe'),null);
-  w.document.querySelector('#googleDocsOrigin').value=origin; w.document.querySelector('#mOk').click();
+  w.document.querySelector('#googleDocsUrl').value=deploy; w.document.querySelector('#mOk').click();
+  assert.equal(JSON.parse(w.localStorage.getItem('megadoc-google-docs-settings-v1')).url,deploy);
   const frame=w.document.querySelector('#googleDocsFrame'), url=new URL(frame.src), nonce=url.searchParams.get('request');
   assert.equal(url.host,'script.google.com'); assert.equal(url.searchParams.size,1); assert.match(nonce,/^[0-9a-f]{32}$/); assert.ok(!frame.src.includes('Hello')); assert.equal(w.document.querySelector('#googleDocsTop').href,deploy);
   const sent=[]; const child={parent:{parent:frame.contentWindow},postMessage:(data,target)=>sent.push({data,target})};
@@ -23,8 +24,15 @@ const assert=require('node:assert/strict'), fs=require('node:fs'), vm=require('n
   msg(child,origin,'megadoc-export-ready'); assert.equal(sent.length,1); assert.equal(sent[0].target,origin); const payload=sent[0].data.payload;
   assert.equal(payload.title,'My tab'); assert.equal(payload.blocks[0].runs[0].text,'Hello 😀'); assert.equal(payload.blocks[1].runs[0].text.length,5000);
   msg(child,origin,'megadoc-export-ready'); assert.equal(sent.length,1); msg({parent:frame.contentWindow},origin,'megadoc-export-received'); assert.match(w.document.querySelector('#googleDocsTransferStatus').textContent,/Sending/);
-  msg(child,origin,'megadoc-export-received'); assert.match(w.document.querySelector('#googleDocsTransferStatus').textContent,/received/i);
+  msg(child,origin,'megadoc-export-received'); assert.match(w.document.querySelector('#googleDocsTransferStatus').textContent,/received/i); assert.equal(JSON.parse(w.localStorage.getItem('megadoc-google-docs-settings-v1')).origin,origin);
   w.document.querySelector('#mCancel').click(); assert.equal(w.document.querySelector('iframe'),null);
+  defaultUrl='https://script.google.com/macros/s/OTHER/exec';
+  w.eval("page.innerText='changed'; openExport()"); await new Promise(resolve=>setTimeout(resolve,0)); assert.equal(w.document.querySelector('#googleDocsUrl').value,deploy); w.document.querySelector('#mOk').click();
+  const changedFrame=w.document.querySelector('#googleDocsFrame'), changedNonce=new URL(changedFrame.src).searchParams.get('request'); const changedOrigin='https://n-another-script.googleusercontent.com'; let changedSent=0;
+  const changedPeer={parent:changedFrame.contentWindow,postMessage(data,target){changedSent++;assert.equal(target,changedOrigin);}};
+  msg(changedPeer,changedOrigin,'megadoc-export-ready',changedNonce); assert.equal(changedSent,0); assert.match(w.document.querySelector('#googleDocsTransferStatus').textContent,/changed/);
+  w.document.querySelector('#googleDocsTrust').click(); assert.equal(changedSent,1); msg(changedPeer,changedOrigin,'megadoc-export-received',changedNonce); assert.equal(JSON.parse(w.localStorage.getItem('megadoc-google-docs-settings-v1')).origin,changedOrigin);
+  w.document.querySelector('#mCancel').click();
   w.eval("page.innerText='cancelled'; openExport()"); await new Promise(resolve=>setTimeout(resolve,0)); w.document.querySelector('#mOk').click();
   const cancelledFrame=w.document.querySelector('#googleDocsFrame'), cancelledNonce=new URL(cancelledFrame.src).searchParams.get('request'); let afterClose=0;
   const latePeer={parent:cancelledFrame.contentWindow,postMessage(){afterClose++}}; w.document.querySelector('#mCancel').click();
@@ -39,9 +47,9 @@ const assert=require('node:assert/strict'), fs=require('node:fs'), vm=require('n
 
   const html=fs.readFileSync('google-apps-script/Index.html','utf8'); const code=html.match(/<script>([\s\S]*?)<\/script>/)[1];
   const outer=new JSDOM('<iframe></iframe>',{url:'https://megadoc.example/',runScripts:'outside-only'}); const f=outer.window.document.querySelector('iframe').contentWindow;
-  f.document.open(); f.document.write(html.replace(/<script>[\s\S]*?<\/script>/,'')); f.document.close(); let create=0; const outgoing=[];
+  f.document.open(); f.document.write(html.replace(/<script>[\s\S]*?<\/script>/,'')); f.document.close(); let create=0, recentFail=false; const outgoing=[];
   outer.window.postMessage=(data,target)=>outgoing.push({data,target});
-  const runner={withSuccessHandler(fn){this.success=fn;return this},withFailureHandler(fn){this.failure=fn;return this},createDocument(value){create++;this.success({ok:true,url:'https://docs.google.com/document/d/abc123456789/edit'});assert.equal(value.title,'My tab')}};
+  const runner={withSuccessHandler(fn){this.success=fn;return this},withFailureHandler(fn){this.failure=fn;return this},listRecentDocuments(){if(recentFail)this.failure({message:'Drive unavailable'}); else this.success([{id:'recent123456789',title:'Recent <doc>'}]);},prepareOverwrite(id){assert.equal(id,'recent123456789');this.success({ticket:'ticket',title:'Existing',documentId:id});},createDocument(value){create++;this.success({ok:true,url:'https://docs.google.com/document/d/abc123456789/edit'});assert.equal(value.title,'My tab')}};
   f.google={script:{run:runner}}; const boot={request:nonce,allowedOrigins:['https://megadoc.example']}; new vm.Script(code.replace('<?!= boot ?>',JSON.stringify(boot))); f.eval(code.replace('<?!= boot ?>',JSON.stringify(boot)));
   assert.equal(create,0); assert.equal(outgoing[0].data.type,'megadoc-export-ready'); assert.equal(outgoing[0].target,'https://megadoc.example');
   const deliver=(org,source,request,data=payload)=>f.dispatchEvent(new f.MessageEvent('message',{origin:org,source,data:{type:'megadoc-export-payload',version:1,request,payload:data}}));
@@ -49,6 +57,8 @@ const assert=require('node:assert/strict'), fs=require('node:fs'), vm=require('n
   deliver('https://megadoc.example',outer.window,nonce,{...payload,blocks:[{kind:'NORMAL_TEXT',runs:[{text:'x'.repeat(100001)}]}]}); assert.equal(f.document.querySelector('#content').value,'');
   deliver('https://megadoc.example',outer.window,nonce); assert.equal(f.document.querySelector('#mode').value,'json'); assert.equal(JSON.parse(f.document.querySelector('#content').value).title,'My tab'); assert.equal(outgoing[1].data.type,'megadoc-export-received');
   deliver('https://megadoc.example',outer.window,nonce,{...payload,title:'replacement'}); assert.equal(JSON.parse(f.document.querySelector('#content').value).title,'My tab');
+  recentFail=true; f.document.querySelector('#loadRecent').click(); assert.match(f.document.querySelector('#status').textContent,/Drive unavailable/); recentFail=false;
+  f.document.querySelector('#loadRecent').click(); assert.equal(f.document.querySelectorAll('#recent option').length,2); assert.equal(f.document.querySelector('#recent option:last-child').textContent,'Recent <doc>'); f.document.querySelector('#recent').value='recent123456789'; f.document.querySelector('#recent').dispatchEvent(new f.Event('change')); assert.equal(f.document.querySelector('#document').value,'recent123456789'); f.document.querySelector('#inspect').click(); assert.equal(f.document.querySelector('#confirm').hidden,false); assert.match(f.document.querySelector('#target').textContent,/Existing/);
   f.document.querySelector('#create').click(); assert.equal(create,1); assert.equal(f.document.querySelector('#status a').href,'https://docs.google.com/document/d/abc123456789/edit'); outer.window.close();
   console.log('Google Docs guarded iframe messaging tests passed');
 })().catch(e=>{console.error(e);process.exitCode=1});

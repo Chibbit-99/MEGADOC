@@ -4,9 +4,10 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
 const path = require('node:path');
+let driveFailure=false, driveArgs;
 let revision = 'r1', documentOverrides = {}, calls = [], cache = new Map(), createFailure = false, updateFailure = false, template, allowedOrigins = '["https://megadoc.example"]';
 const base = () => ({title:'Existing', revisionId:revision, suggestionsViewMode:'SUGGESTIONS_INLINE', commentsViewMode:'COMMENTS_VIEW_MODE_INCLUDED', tabs:[{tabProperties:{tabId:'t.0'}, documentTab:{body:{content:[{sectionBreak:{},startIndex:0,endIndex:1},{paragraph:{elements:[{textRun:{content:'old\n'}}]},startIndex:1,endIndex:5}]}}}]});
-const ctx = {Docs:{Documents:{
+const ctx = {Drive:{Files:{list(options){driveArgs=options; if(driveFailure) throw Error('denied'); return {files:[{id:'recent123456789',name:'Recent',capabilities:{canEdit:true}},{id:'readonly123456789',name:'Read only',capabilities:{canEdit:false}},{id:'bad!',name:'Invalid',capabilities:{canEdit:true}}]};}}},Docs:{Documents:{
   get(id,options) { calls.push({method:'get',id,options}); return {...base(),...documentOverrides}; },
   create(data) { calls.push({method:'create',data}); if (createFailure) throw Error('network'); return {documentId:'doc123456789'}; },
   batchUpdate(body,id) { calls.push({method:'batchUpdate',body,id}); if (updateFailure) throw Error('network'); }
@@ -30,6 +31,8 @@ exec('doGet',{parameter:{request:'bad',payload:JSON.stringify(payload)}}); asser
 allowedOrigins='["https://good.example", "*", "https://evil.example/path", "http://localhost:8000"]';
 exec('doGet',{}); assert.equal(JSON.stringify(JSON.parse(template.boot).allowedOrigins),JSON.stringify(['https://good.example','http://localhost:8000']));
 allowedOrigins='not-json'; exec('doGet',{}); assert.equal(JSON.parse(template.boot).allowedOrigins.length,0);
+allowedOrigins=null; exec('doGet',{}); assert.equal(JSON.parse(template.boot).allowedOrigins[0],'https://chibbit-99.github.io');
+let recent=exec('listRecentDocuments'); assert.equal(recent.length,1); assert.equal(recent[0].id,'recent123456789'); assert.equal(driveArgs.orderBy,'viewedByMeTime desc'); assert.match(driveArgs.q,/application\/vnd\.google-apps\.document/); driveFailure=true; rejects(()=>exec('listRecentDocuments'),/Drive authorization/); driveFailure=false;
 allowedOrigins='["https://megadoc.example"]';
 rejects(()=>exec('validatePayload_', {...payload,blocks:[{kind:'NORMAL_TEXT',runs:[{text:'x'.repeat(100001)}]}]}),/large/);
 assert.equal(exec('validatePayload_', {...payload,blocks:[{kind:'NORMAL_TEXT',runs:[{text:'x'.repeat(10000)}]}]}).blocks[0].runs[0].text.length,10000);
