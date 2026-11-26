@@ -2,13 +2,28 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), vm=require('node:vm'), {JSDOM}=require('jsdom');
 (async()=>{
   const dom=new JSDOM('<div id="modalBackdrop" class="hidden"><div id="modal"></div></div><div id="page"></div>', {url:'https://megadoc.example/',runScripts:'outside-only'});
-  const w=dom.window; let fetches=0, transferTimer, defaultUrl='https://script.google.com/macros/s/DEPLOY/exec'; const realTimeout=w.setTimeout.bind(w); w.setTimeout=(fn,ms,...args)=> ms===30000 ? (transferTimer=fn,12345) : realTimeout(fn,ms,...args);
-  const origin='https://n-test-script.googleusercontent.com', deploy='https://script.google.com/macros/s/DEPLOY/exec';
+  const w=dom.window; let fetches=0, transferTimer, defaultUrl='https://script.google.com/a/macros/education.nsw.gov.au/s/AKfycbx_123-A/exec'; const realTimeout=w.setTimeout.bind(w); w.setTimeout=(fn,ms,...args)=> ms===30000 ? (transferTimer=fn,12345) : realTimeout(fn,ms,...args);
+  const origin='https://n-test-script.googleusercontent.com', deploy='https://script.google.com/a/macros/education.nsw.gov.au/s/AKfycbx_123-A/exec';
   w.fetch=async()=>{fetches++;return {ok:true,json:async()=>({appsScriptUrl:defaultUrl})}};
   w.eval("var GOOGLE_DOCS_SETTINGS_KEY='megadoc-google-docs-settings-v1'");
   w.eval(`var $ = s => document.querySelector(s); var state={activeTabId:'one'}; var tab={title:'My tab'}; var getTab = id => id==='one'?tab:null; var page=$('#page'); function toast(){} function saveCurrentContent(){} function openModal(title,body,foot){$('#modal').innerHTML=body+foot;$('#modalBackdrop').classList.remove('hidden')} function closeModal(){if (googleDocsCleanup) googleDocsCleanup(); $('#modalBackdrop').classList.add('hidden'); const frame=$('#googleDocsFrame'); if(frame){frame.remove();$('#googleDocsTop')?.removeAttribute('href')}}`);
   let src=fs.readFileSync('js/app.js','utf8'); src=src.slice(src.indexOf('function googleDocsDeploymentUrl('),src.indexOf('function localImportDialog()'));
-  w.eval(src.replace('let googleDocsCleanup = null;','var googleDocsCleanup = null;')+"\nwindow.openExport=googleDocsExportDialog;"); w.eval("page.innerText='Hello 😀\\n'+ 'x'.repeat(5000); openExport()");
+  w.eval(src.replace('let googleDocsCleanup = null;','var googleDocsCleanup = null;')+"\nwindow.openExport=googleDocsExportDialog;");
+  assert.equal(w.googleDocsDeploymentUrl('https://script.google.com/macros/s/DEPLOY/exec').href,'https://script.google.com/macros/s/DEPLOY/exec');
+  assert.equal(w.googleDocsDeploymentUrl(deploy).href,deploy);
+  for (const bad of [
+    'http://script.google.com/a/macros/education.nsw.gov.au/s/ID/exec',
+    'https://script.google.com.evil.test/a/macros/education.nsw.gov.au/s/ID/exec',
+    'https://evil.test@script.google.com/a/macros/education.nsw.gov.au/s/ID/exec',
+    'https://script.google.com/a/macros/education..nsw.gov.au/s/ID/exec',
+    'https://script.google.com/a/macros/-bad.example/s/ID/exec',
+    'https://script.google.com/a/macros/education.nsw.gov.au/s/ID/dev',
+    'https://script.google.com/a/macros/education.nsw.gov.au/s/ID/exec?foo=1',
+    'https://script.google.com/a/macros/education.nsw.gov.au/s/ID/exec#fragment',
+    'https://script.google.com/a/macros/education.nsw.gov.au/s/ID/exec/extra',
+    'https://script.google.com/macros/s/ID/exec?foo=1'
+  ]) assert.throws(()=>w.googleDocsDeploymentUrl(bad),/web app/);
+  w.eval("page.innerText='Hello 😀\\n'+ 'x'.repeat(5000); openExport()");
   await new Promise(resolve=>setTimeout(resolve,0));
   assert.equal(fetches,1); assert.equal(w.document.querySelector('#googleDocsUrl').value,deploy); assert.equal(w.document.querySelector('#googleDocsOrigin'),null);
   assert.equal(w.document.querySelector('iframe'),null); // Nothing sent before consent.
