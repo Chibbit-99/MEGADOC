@@ -4,21 +4,35 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
 const path = require('node:path');
-let revision = 'r1', documentOverrides = {}, calls = [], cache = new Map(), createFailure = false, updateFailure = false;
+let revision = 'r1', documentOverrides = {}, calls = [], cache = new Map(), createFailure = false, updateFailure = false, template, allowedOrigins = '["https://megadoc.example"]';
 const base = () => ({title:'Existing', revisionId:revision, suggestionsViewMode:'SUGGESTIONS_INLINE', commentsViewMode:'COMMENTS_VIEW_MODE_INCLUDED', tabs:[{tabProperties:{tabId:'t.0'}, documentTab:{body:{content:[{sectionBreak:{},startIndex:0,endIndex:1},{paragraph:{elements:[{textRun:{content:'old\n'}}]},startIndex:1,endIndex:5}]}}}]});
 const ctx = {Docs:{Documents:{
   get(id,options) { calls.push({method:'get',id,options}); return {...base(),...documentOverrides}; },
   create(data) { calls.push({method:'create',data}); if (createFailure) throw Error('network'); return {documentId:'doc123456789'}; },
   batchUpdate(body,id) { calls.push({method:'batchUpdate',body,id}); if (updateFailure) throw Error('network'); }
-}}, Utilities:{getUuid:()=>crypto.randomUUID(), computeDigest(_alg,text) { return [...crypto.createHash('sha256').update(text).digest()].map(n=>n>127?n-256:n); },DigestAlgorithm:{SHA_256:'sha'},Charset:{UTF_8:'utf8'}},
+}}, Utilities:{newBlob:text=>({getBytes:()=>Buffer.from(text)}), getUuid:()=>crypto.randomUUID(), computeDigest(_alg,text) { return [...crypto.createHash('sha256').update(text).digest()].map(n=>n>127?n-256:n); },DigestAlgorithm:{SHA_256:'sha'},Charset:{UTF_8:'utf8'}},
 CacheService:{getUserCache:()=>({put:(k,v)=>cache.set(k,v),get:k=>cache.get(k),remove:k=>cache.delete(k)})},LockService:{getUserLock:()=>({waitLock(){},releaseLock(){}})},
-HtmlService:{createHtmlOutputFromFile:()=>({setTitle:()=>({})})},console};
+PropertiesService:{getScriptProperties:()=>({getProperty:()=>allowedOrigins})},
+HtmlService:{XFrameOptionsMode:{ALLOWALL:'ALLOWALL'},createTemplateFromFile:()=>{ template={evaluate:()=>({setTitle:()=>({setXFrameOptionsMode:mode=>({mode})})})}; return template; }},console};
 vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../Code.gs'),'utf8'),ctx);
 const payload = {version:1,title:'Example',blocks:[{kind:'HEADING_1',runs:[{text:'Hi 😀',style:{bold:true}},{text:' link',style:{link:'https://example.com'}}]},{kind:'NORMAL_TEXT',runs:[]}]};
 const exec = (name,...args) => ctx[name](...args);
 const rejects = (fn,re) => assert.throws(fn,re);
 const id='1234567890abcdef';
+const nonce='0123456789abcdef0123456789abcdef';
+let getResult=exec('doGet',{parameters:{request:[nonce]},parameter:{request:nonce}});
+assert.equal(getResult.mode,'ALLOWALL');
+assert.equal(JSON.parse(template.boot).request,nonce);
+assert.equal(JSON.parse(template.boot).allowedOrigins[0],'https://megadoc.example');
+exec('doGet',{parameters:{request:[nonce,nonce]},parameter:{request:nonce}}); assert.equal(JSON.parse(template.boot).request,'');
+exec('doGet',{parameter:{request:'bad',payload:JSON.stringify(payload)}}); assert.equal(JSON.parse(template.boot).request,''); assert.equal(JSON.parse(template.boot).payload,undefined);
+allowedOrigins='["https://good.example", "*", "https://evil.example/path", "http://localhost:8000"]';
+exec('doGet',{}); assert.equal(JSON.stringify(JSON.parse(template.boot).allowedOrigins),JSON.stringify(['https://good.example','http://localhost:8000']));
+allowedOrigins='not-json'; exec('doGet',{}); assert.equal(JSON.parse(template.boot).allowedOrigins.length,0);
+allowedOrigins='["https://megadoc.example"]';
+rejects(()=>exec('validatePayload_', {...payload,blocks:[{kind:'NORMAL_TEXT',runs:[{text:'x'.repeat(100001)}]}]}),/large/);
+assert.equal(exec('validatePayload_', {...payload,blocks:[{kind:'NORMAL_TEXT',runs:[{text:'x'.repeat(10000)}]}]}).blocks[0].runs[0].text.length,10000);
 assert.equal(exec('documentId_',`https://docs.google.com/document/d/${id}/edit`),id);
 rejects(()=>exec('documentId_',`https://evil.example/document/d/${id}/edit`),/valid/);
 rejects(()=>exec('validatePayload_', {...payload,blocks:[{kind:'NORMAL_TEXT',runs:[{text:'bad\nline'}]}]}),/unsupported/);

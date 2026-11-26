@@ -1414,6 +1414,7 @@ const MENUS = [
     { icon: 'html', label: 'Export current tab as HTML', fn: () => exportLocalContent('html') },
     { icon: 'description', label: 'Export current tab as DOCX…', fn: () => exportOfficeDialog('docx') },
     { icon: 'description', label: 'Export current tab as ODT…', fn: () => exportOfficeDialog('odt') },
+    { icon: 'cloud_upload', label: 'Export current tab to Google Docs…', fn: googleDocsExportDialog },
     { icon: 'restore', label: 'Restore previous local document…', fn: restoreLegacy },
     { sep: true },
     { icon: 'description', label: 'Page setup…', fn: showPageSetup },
@@ -2068,6 +2069,87 @@ function exportLocalContent(format) {
   a.href = URL.createObjectURL(file); a.download = `${(tab.title || 'MegaDoc tab').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_')}.${extension}`;
   a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); toast(`Current tab exported as ${extension.toUpperCase()}`, 'download');
 }
+// The deployment is public configuration, never a credential. URLs with extra
+// parameters are rejected so the export controls exactly what is sent.
+function googleDocsDeploymentUrl(value) {
+  let url;
+  try { url = new URL(value.trim()); } catch { throw new Error('Enter the deployed Apps Script web app URL.'); }
+  if (url.protocol !== 'https:' || url.hostname !== 'script.google.com' || url.port || url.username || url.password || url.search || url.hash || !/^\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url.pathname)) throw new Error('Use an HTTPS script.google.com/macros/s/.../exec deployment URL without parameters.');
+  return url;
+}
+function googleDocsScriptOrigin(value) {
+  let url; try { url = new URL(value.trim()); } catch { throw new Error('Enter the exact HTML-service origin shown by your deployment.'); }
+  if (url.protocol !== 'https:' || !/^[a-z0-9-]+-script\.googleusercontent\.com$/.test(url.hostname) || url.port || url.username || url.password || url.pathname !== '/' || url.search || url.hash || value.trim() !== url.origin) throw new Error('Use the exact HTTPS HTML-service origin shown by your deployment, without a path or trailing slash.');
+  return url.origin;
+}
+function googleDocsPayload(tab, text) {
+  const title = (tab.title || 'MegaDoc tab').trim();
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  if (!title || title.length > 120 || /[\x00-\x1f\x7f-\x9f]/.test(title)) throw new Error('The tab title must be 1–120 characters without control characters.');
+  if (lines.length > 500 || text.length + lines.length > 100000 || lines.some(line => /[\x00-\x1f\x7f-\x9f\ue000-\uf8ff]/.test(line) || /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(line))) throw new Error('This tab exceeds the supported text limits or contains unsupported characters. Use a plain-text export instead.');
+  return {version:1,title,blocks:lines.map(line => ({kind:'NORMAL_TEXT',runs:line ? [{text:line}] : []}))};
+}
+// Google can nest the HTML-service window inside multiple cross-origin frames.
+// Window.parent is cross-origin-readable; never inspect their documents.
+function googleDocsIsDescendant(source, root) {
+  try {
+    for (let current = source, depth = 0; current && depth < 10; depth++) {
+      if (current === root) return true;
+      const parent = current.parent;
+      if (!parent || parent === current) break;
+      current = parent;
+    }
+  } catch (_) { /* Fail closed if a browser denies access. */ }
+  return false;
+}
+let googleDocsCleanup = null;
+function googleDocsExportDialog() {
+  const tab = getTab(state.activeTabId);
+  if (!tab) { toast('Create a tab first', 'info'); return; }
+  const id = state.activeTabId;
+  openModal('Export current tab to Google Docs', `<p>Enter the trusted Apps Script deployment URL and its exact HTML-service origin. Configure the allowed MegaDoc origin in the script first. <a href="google-apps-script/README.md" target="_blank" rel="noopener noreferrer">Setup instructions</a>.</p><div class="field"><label for="googleDocsUrl">Apps Script deployment URL</label><input id="googleDocsUrl" type="url" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"></div><div class="field"><label for="googleDocsOrigin">HTML-service origin from that deployment</label><input id="googleDocsOrigin" type="url" placeholder="https://…-script.googleusercontent.com" autocomplete="off"></div><p>After you continue, the current tab’s <b>plain text</b> is sent to the trusted exporter through the browser, not in the URL. The deployment acts as the Google user who authorizes it. Formatting, images, comments, history and other tabs are not exported. Keep a JSON backup.</p><p>Verify the deployment and origin yourself. The embedded app is experimental and can be clickjacked; open it directly if anything looks unexpected.</p><p id="googleDocsError" role="alert"></p>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Send tab and open exporter</button>`);
+  const input = $('#googleDocsUrl'), originInput = $('#googleDocsOrigin');
+  fetch('google-docs.config.json', {cache:'no-store'}).then(r => r.ok ? r.json() : null).then(config => {
+    if (!input.isConnected) return;
+    if (!input.value && typeof config?.appsScriptUrl === 'string') input.value = config.appsScriptUrl;
+    if (!originInput.value && typeof config?.htmlServiceOrigin === 'string') originInput.value = config.htmlServiceOrigin;
+  }).catch(() => {});
+  $('#mCancel').addEventListener('click',closeModal);
+  $('#mOk').addEventListener('click', () => {
+    try {
+      if (state.activeTabId !== id || !getTab(id)) throw new Error('Select the tab again before exporting.');
+      if (window.top !== window) throw new Error('Open MegaDoc directly in a top-level browser tab to use the iframe exporter.');
+      const url = googleDocsDeploymentUrl(input.value), origin = googleDocsScriptOrigin(originInput.value);
+      if (!window.crypto?.getRandomValues) throw new Error('This browser cannot create a secure export request.');
+      saveCurrentContent();
+      let payload = googleDocsPayload(tab, page.innerText);
+      const request = [...crypto.getRandomValues(new Uint8Array(16))].map(n => n.toString(16).padStart(2,'0')).join('');
+      const directUrl = url.href;
+      url.searchParams.set('request', request); // Correlation only, never document data or credentials.
+      openModal('Google Docs exporter', `<p>Waiting for the configured exporter. If it cannot connect, check the two origin settings, sign in, or open it directly and paste a text export.</p><p id="googleDocsTransferStatus" role="status" aria-live="polite">Waiting for the iframe…</p><p><a id="googleDocsTop" target="_blank" rel="noopener noreferrer">Open exporter directly</a></p><iframe id="googleDocsFrame" title="Google Docs exporter" referrerpolicy="no-referrer" style="width:100%;height:min(65vh,650px);border:1px solid #aaa;background:white"></iframe>`, `<button class="btn text" id="mCancel">Close</button>`);
+      const frame = $('#googleDocsFrame'), status = $('#googleDocsTransferStatus');
+      let peer = null, done = false, timer;
+      function cleanup() { if (done) return; done = true; payload = null; clearTimeout(timer); window.removeEventListener('message',onMessage); if (googleDocsCleanup === cleanup) googleDocsCleanup = null; }
+      function onMessage(event) {
+        const msg = event.data;
+        if (!msg || msg.version !== 1 || msg.request !== request || event.origin !== origin || !event.source || !googleDocsIsDescendant(event.source, frame.contentWindow)) return;
+        if (msg.type === 'megadoc-export-ready' && !peer) {
+          peer = event.source;
+          status.textContent = 'Connected. Sending tab to the exporter…';
+          try { peer.postMessage({type:'megadoc-export-payload',version:1,request,payload},origin); }
+          catch (_) { status.textContent = 'Transfer failed. Open the exporter directly and paste a text export.'; cleanup(); }
+        } else if (msg.type === 'megadoc-export-received' && peer && event.source === peer) {
+          status.textContent = 'Tab received. Review it in the exporter before choosing an action.'; cleanup();
+        }
+      }
+      googleDocsCleanup = cleanup;
+      window.addEventListener('message',onMessage);
+      timer = setTimeout(() => { status.textContent = 'Could not confirm transfer. Check the deployment, allowed origins and sign-in, or open the exporter directly and paste a text export.'; cleanup(); },30000);
+      $('#googleDocsTop').href=directUrl; frame.src=url.href;
+      $('#mCancel').addEventListener('click', closeModal);
+    } catch (error) { const errorElement = $('#googleDocsError'); if (errorElement) errorElement.textContent = error.message; }
+  });
+}
 function localImportDialog() {
   openModal('Import text, HTML, DOCX or ODT', `<p>Choose a plain text, HTML, Word .docx or OpenDocument .odt file to create a <b>new root tab</b>. Existing tabs are not replaced.</p><p>HTML, Word and OpenDocument files are converted and sanitized; unsupported formatting, embedded objects, scripts and document features may be lost. Images with external URLs may contact their host. Text loses formatting; JSON is the complete MegaDoc backup format.</p><p>Only import files you trust. Maximum file size: 10 MB.</p>`, `<button class="btn text" id="mCancel">Cancel</button><button class="btn primary" id="mOk">Choose file</button>`);
   $('#mCancel').addEventListener('click', closeModal);
@@ -2185,6 +2267,7 @@ function resetAll() {
 
 /* ─────────────────────────── Modals ─────────────────────────── */
 function openModal(title, bodyHTML, footHTML = '') {
+  if (googleDocsCleanup) googleDocsCleanup();
   $('#modal').innerHTML = `
     <div class="modal-head"><span class="modal-title">${esc(title)}</span>
       <button class="icon-btn sm" id="modalClose" aria-label="Close"><span class="material-symbols-outlined">close</span></button></div>
@@ -2193,7 +2276,7 @@ function openModal(title, bodyHTML, footHTML = '') {
   $('#modalBackdrop').classList.remove('hidden');
   $('#modalClose').addEventListener('click', closeModal);
 }
-function closeModal() { $('#modalBackdrop').classList.add('hidden'); }
+function closeModal() { if (googleDocsCleanup) googleDocsCleanup(); $('#modalBackdrop').classList.add('hidden'); const frame = $('#googleDocsFrame'); if (frame) { frame.remove(); $('#googleDocsTop')?.removeAttribute('href'); } }
 $('#modalBackdrop').addEventListener('click', e => { if (e.target.id === 'modalBackdrop') closeModal(); });
 
 function confirmModal(title, bodyHTML, confirmLabel, onConfirm) {
