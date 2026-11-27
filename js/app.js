@@ -977,9 +977,11 @@ const toolbarActions = {
   redo: () => exec('redo'),
   print: () => showPaginationPreview(),
   spellcheck: () => {
-    const on = page.spellcheck;
-    page.spellcheck = !on;
-    toast(on ? 'Spellcheck off' : 'Spellcheck on', 'spellcheck');
+    const on = spellingEnabled;
+    spellingEnabled = !on;
+    page.spellcheck = spellingEnabled && !customSpellingActive;
+    scheduleSpellHighlights();
+    toast(on ? 'Spellcheck off' : (customSpellingActive ? 'Spellcheck on' : 'Browser spellcheck on; personal words may still be underlined'), 'spellcheck');
   },
   paint: paintFormat,
   bold: () => exec('bold'),
@@ -1334,6 +1336,7 @@ function wireImageControls() {
 
 function setMode(m) {
   mode = m;
+  scheduleSpellHighlights();
   if (m === 'viewing') clearImageSelection();
   syncFormatButtons();
   $('#modeLabel').textContent = m[0].toUpperCase() + m.slice(1);
@@ -1572,6 +1575,14 @@ function savePersonalWord(word, add) {
   catch (_) { throw new Error('Could not save the personal dictionary in browser storage.'); }
 }
 function isPersonalWord(word) { try { return personalDictionary().has(personalWordKey(word)); } catch (_) { return false; } }
+let spellingEnabled = true;
+let customSpellingActive = typeof CSS !== 'undefined' && !!CSS.highlights && typeof Highlight !== 'undefined' && (!CSS.supports || CSS.supports('selector(::highlight(megadoc-spelling))'));
+let spellGeneration = 0, spellTimer = null;
+const spellCache = new Map();
+const SPELL_HIGHLIGHT = 'megadoc-spelling';
+const SPELL_EXCLUDED = '[spellcheck="false"],pre,code,[contenteditable="false"],a[data-megadoc-footnote],a[data-megadoc-bookmark]';
+// The editor itself has native spellcheck disabled when custom highlights run.
+function spellExcluded(element) { const found=element?.closest(SPELL_EXCLUDED); return !!found && found !== page; }
 let spellWorker = null, spellSequence = 0;
 const spellPending = new Map();
 function stopSpellWorker(message) {
@@ -1579,11 +1590,10 @@ function stopSpellWorker(message) {
   for (const request of spellPending.values()) { clearTimeout(request.timer); request.reject(new Error(message)); }
   spellPending.clear();
 }
-function spellingSuggestions(word) {
-  if (isPersonalWord(word)) return Promise.resolve({correct:true,personal:true});
+function spellRequest(data) {
   return new Promise((resolve, reject) => {
     if (!spellWorker) {
-      try { spellWorker = new Worker('js/spell-worker.js'); }
+      try { spellWorker = new Worker('js/spell-worker.js?v=2'); }
       catch { reject(new Error('Spelling worker unavailable')); return; }
       spellWorker.onmessage = ({data}) => {
         const pending = spellPending.get(data?.id); if (!pending) return;
@@ -1595,11 +1605,81 @@ function spellingSuggestions(word) {
     const id = ++spellSequence;
     const timer = setTimeout(() => stopSpellWorker('Spelling suggestions timed out'), 12000);
     spellPending.set(id, {resolve,reject,timer});
-    try { spellWorker.postMessage({id,word}); } catch { stopSpellWorker('Spelling worker unavailable'); }
+    try { spellWorker.postMessage({id,...data}); } catch { stopSpellWorker('Spelling worker unavailable'); }
   });
 }
+function spellingSuggestions(word) {
+  if (isPersonalWord(word)) return Promise.resolve({correct:true,personal:true});
+  return spellRequest({word});
+}
+// CSS highlights are ephemeral ranges, never DOM wrappers: they cannot enter
+// document content, clipboard, undo history or exports.
+function clearSpellHighlights() { if (typeof CSS !== 'undefined' && CSS.highlights) CSS.highlights.delete(SPELL_HIGHLIGHT); }
+function scheduleSpellHighlights() {
+  spellGeneration++; clearTimeout(spellTimer); clearSpellHighlights();
+  if (!spellingEnabled || !customSpellingActive || mode === 'viewing' || !getTab(state.activeTabId)) return;
+  const generation=spellGeneration;
+  spellTimer=setTimeout(()=>refreshSpellHighlights(generation),250);
+}
+function spellFallback(message) {
+  customSpellingActive=false; spellGeneration++; clearTimeout(spellTimer); clearSpellHighlights();
+  page.spellcheck=spellingEnabled;
+  toast(message + ' Using browser spellcheck; personal words may still be underlined.', 'info');
+}
+async function refreshSpellHighlights(generation) {
+  if (generation !== spellGeneration || !spellingEnabled || !customSpellingActive || mode === 'viewing') return;
+  const tabId=state.activeTabId, tab=getTab(tabId), nodes=[], walker=document.createTreeWalker(page,NodeFilter.SHOW_TEXT);
+  let node, chars=0, visited=0;
+  while ((node=walker.nextNode())) {
+    chars += node.data.length;
+    if (++visited > 5000 || chars > 200000) { spellFallback('This tab is too large for MegaDoc spelling highlights.'); return; }
+    if (!node.data.length) continue;
+    nodes.push({node,source:node.data,block:node.parentElement?.closest('p,div,h1,h2,h3,h4,h5,h6,li,td,th,blockquote') || page});
+  }
+  let personal; try { personal=personalDictionary(); } catch (_) { spellFallback('The personal dictionary could not be read.'); return; }
+  const occurrences=[], unique=new Set();
+  for (let i=0;i<nodes.length;i++) {
+    const entry=nodes[i], text=entry.source;
+    if (spellExcluded(entry.node.parentElement)) continue;
+    for (const match of text.matchAll(/[A-Za-z]+(?:['’][A-Za-z]+)*/g)) {
+      const word=match[0], start=match.index, end=start+word.length;
+      if (word.length < 2 || word.length > 32 || personal.has(personalWordKey(word))) continue;
+      let before=text[start-1] || '', after=text[end] || '';
+      if (!before && i && nodes[i-1].block === entry.block) before=nodes[i-1].source.slice(-1);
+      if (!after && i+1<nodes.length && nodes[i+1].block === entry.block) after=nodes[i+1].source.slice(0,1);
+      if (/[\p{L}\p{M}\p{N}'’]/u.test(before) || /[\p{L}\p{M}\p{N}'’]/u.test(after)) continue;
+      occurrences.push({node:entry.node,source:text,start,end,word}); unique.add(word);
+      if (occurrences.length > 12000 || unique.size > 6000) { spellFallback('This tab has too many words for MegaDoc spelling highlights.'); return; }
+    }
+  }
+  let missing=[...unique].filter(word=>!spellCache.has(word));
+  if (spellCache.size + missing.length > 12000) { spellCache.clear(); missing=[...unique]; }
+  try {
+    for (let i=0;i<missing.length;i+=200) {
+      const batch=missing.slice(i,i+200), response=await spellRequest({kind:'check',words:batch});
+      if (generation !== spellGeneration) return;
+      if (!Array.isArray(response.correct) || response.correct.length !== batch.length || response.correct.some(x=>typeof x !== 'boolean')) throw new Error('Invalid spellcheck response');
+      batch.forEach((word,j)=>spellCache.set(word,response.correct[j]));
+    }
+    if (generation !== spellGeneration || state.activeTabId !== tabId || getTab(tabId) !== tab || mode === 'viewing') return;
+    if (nodes.some(entry=>!page.contains(entry.node) || entry.node.data !== entry.source)) { scheduleSpellHighlights(); return; }
+    const highlight=new Highlight();
+    for (const item of occurrences) if (spellCache.get(item.word) === false) {
+      const range=document.createRange(); range.setStart(item.node,item.start); range.setEnd(item.node,item.end); highlight.add(range);
+    }
+    CSS.highlights.set(SPELL_HIGHLIGHT,highlight);
+  } catch (_) {
+    if (generation === spellGeneration && customSpellingActive) spellFallback('MegaDoc spelling could not be loaded.');
+  }
+}
+function initSpelling() {
+  page.spellcheck=spellingEnabled && !customSpellingActive;
+  new MutationObserver(scheduleSpellHighlights).observe(page,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['spellcheck','contenteditable','data-megadoc-footnote','data-megadoc-bookmark']});
+  addEventListener('storage',event=>{ if (event.key === PERSONAL_DICTIONARY_KEY || event.key === null) scheduleSpellHighlights(); });
+  scheduleSpellHighlights();
+}
 function wordAtContextPoint(event) {
-  if (!page.spellcheck || event.target.closest('[spellcheck="false"],pre,code,[contenteditable="false"],a[data-megadoc-footnote],a[data-megadoc-bookmark]')) return null;
+  if (!spellingEnabled || spellExcluded(event.target)) return null;
   let node, offset;
   if (event.clientX || event.clientY) {
     const point = document.caretPositionFromPoint?.(event.clientX,event.clientY);
@@ -1609,7 +1689,7 @@ function wordAtContextPoint(event) {
     const selection=getSelection();
     if (selection.rangeCount && selection.isCollapsed) { node=selection.anchorNode; offset=selection.anchorOffset; }
   }
-  if (node?.nodeType !== Node.TEXT_NODE || !page.contains(node) || node.parentElement?.closest('[spellcheck="false"],pre,code,[contenteditable="false"],a[data-megadoc-footnote],a[data-megadoc-bookmark]')) return null;
+  if (node?.nodeType !== Node.TEXT_NODE || !page.contains(node) || spellExcluded(node.parentElement)) return null;
   const source = node.data;
   for (const match of source.matchAll(/[A-Za-z]+(?:['’][A-Za-z]+)*/g)) {
     const start = match.index, end = start + match[0].length;
@@ -1619,7 +1699,7 @@ function wordAtContextPoint(event) {
     let before=source[start-1] || '', after=source[end] || '';
     if (!before && start===0) { const r=document.createRange(); r.selectNodeContents(block); r.setEnd(node,0); before=r.toString().slice(-1); }
     if (!after && end===source.length) { const r=document.createRange(); r.selectNodeContents(block); r.setStart(node,source.length); after=r.toString().slice(0,1); }
-    if (/[\p{L}\p{M}'’]/u.test(before) || /[\p{L}\p{M}'’]/u.test(after)) continue;
+    if (/[\p{L}\p{M}\p{N}'’]/u.test(before) || /[\p{L}\p{M}\p{N}'’]/u.test(after)) continue;
     const range = document.createRange(); range.setStart(node,start); range.setEnd(node,end);
     if ((event.clientX || event.clientY) && ![...range.getClientRects()].some(r=>event.clientX >= r.left-1 && event.clientX <= r.right+1 && event.clientY >= r.top-1 && event.clientY <= r.bottom+1)) continue;
     return {node,source,start,end,word:match[0],tab:getTab(state.activeTabId),tabId:state.activeTabId};
@@ -1627,7 +1707,7 @@ function wordAtContextPoint(event) {
   return null;
 }
 function spellingTargetValid(target) {
-  return page.spellcheck && mode !== 'viewing' && getTab(target.tabId) === target.tab && state.activeTabId === target.tabId && page.contains(target.node) && target.node.data === target.source && !target.node.parentElement?.closest('[spellcheck="false"],pre,code,[contenteditable="false"],a[data-megadoc-footnote],a[data-megadoc-bookmark]');
+  return spellingEnabled && mode !== 'viewing' && getTab(target.tabId) === target.tab && state.activeTabId === target.tabId && page.contains(target.node) && target.node.data === target.source && !spellExcluded(target.node.parentElement);
 }
 function addSpellingSection(menu, target, reposition) {
   if (!target) return;
@@ -1644,7 +1724,8 @@ function addSpellingSection(menu, target, reposition) {
       if (!spellingTargetValid(target)) { toast('Text changed; right-click the word again', 'info'); return; }
       try {
         savePersonalWord(target.word,!saved);
-        toast(saved ? 'Removed from MegaDoc personal dictionary' : 'Added to MegaDoc dictionary; browser underlines may remain', 'spellcheck');
+        scheduleSpellHighlights();
+        toast(saved ? 'Removed from MegaDoc personal dictionary' : (customSpellingActive ? 'Added to MegaDoc personal dictionary' : 'Added to MegaDoc dictionary; browser underlines may remain'), 'spellcheck');
       } catch (error) { toast(error.message, 'error'); }
     });
     section.insertBefore(button,separator);
@@ -3528,6 +3609,7 @@ function init() {
   dragMarker($('#markerLeft'), 'left');
   dragMarker($('#markerRight'), 'right');
 
+  initSpelling();
   loadTabContent();
   renderTree();
   setZoom(state.zoom || 100);

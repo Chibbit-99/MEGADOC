@@ -1,5 +1,4 @@
-// Local, isolated spelling suggestions. The browser's underline dictionary is
-// independent; these suggestions use the bundled US and Australian word lists.
+// Local US and Australian dictionaries, shared by suggestions and underlines.
 importScripts('../vendor/spelling/nspell.min.js');
 const dictionaries = Promise.all(['en.aff','en-us.dic','en-au.dic'].map(async name => {
   const response = await fetch(`../vendor/spelling/${name}`);
@@ -17,6 +16,12 @@ function adjacentSwap(word, candidate) {
 self.onmessage = async ({data}) => {
   try {
     const {id, word} = data;
+    if (data.kind === 'check') {
+      if (!Array.isArray(data.words) || data.words.length > 200 || data.words.some(w => typeof w !== 'string' || w.length < 2 || w.length > 32 || !/^[A-Za-z]+(?:['’][A-Za-z]+)*$/.test(w))) throw new Error('Unsupported word batch');
+      const engines = await dictionaries;
+      self.postMessage({id, correct:data.words.map(w=>engines.some(engine=>engine.correct(w.replace(/’/g,"'"))))});
+      return;
+    }
     if (typeof word !== 'string' || word.length > 32 || !/^[A-Za-z]+(?:['’][A-Za-z]+)*$/.test(word)) throw new Error('Unsupported word');
     const engines = await dictionaries, normalized = word.replace(/’/g, "'");
     if (engines.some(engine => engine.correct(normalized))) { self.postMessage({id, correct:true}); return; }

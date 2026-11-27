@@ -177,6 +177,8 @@ body.toolbar-hidden .ruler{display:none}
 .page-wrap{width:var(--document-width,816px);max-width:100%;margin:0 auto;transform-origin:top center;transition:none}
 .page{background:#fff;border:1px solid #d9dcda;box-shadow:var(--shadow-page);min-height:var(--document-height,1056px);padding:72px 72px 96px;outline:none;font-family:Arial,Helvetica,sans-serif;font-size:11pt;line-height:1.5;color:#000;word-wrap:break-word}
 .page:focus{box-shadow:var(--shadow-page)}
+/* Transient spellcheck ranges never modify document HTML. */
+::highlight(megadoc-spelling){text-decoration-line:underline;text-decoration-style:wavy;text-decoration-color:#d93025}
 .page h1{font-size:26pt;font-weight:700;margin:0 0 12px;line-height:1.25}
 .page h2{font-size:20pt;font-weight:700;margin:18px 0 8px;line-height:1.3}
 .page h3{font-size:15pt;font-weight:700;margin:14px 0 6px}
